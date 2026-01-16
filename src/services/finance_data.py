@@ -1,43 +1,45 @@
-from typing import Any
-from src.clients.rapidapi_yh import RapidYHClient
-from src.services.cache_store import cache_get, cache_set
-from src.config import get_settings
+from __future__ import annotations
 
-def _ck_static(ticker: str) -> str:
-    return f"static:{ticker.upper()}"
+from src.services.rapidapi_client import rapidapi_get, RapidAPIError
 
-def _ck_price(ticker: str) -> str:
-    return f"price:{ticker.upper()}"
+def _modules(ticker: str, module: str) -> dict:
+    # Endpoint de yahoo-finance15:
+    # /api/v1/markets/stock/modules?ticker=AAPL&module=earnings
+    return rapidapi_get(
+        "/api/v1/markets/stock/modules",
+        params={"ticker": ticker, "module": module},
+    )
 
-def get_static_data(ticker: str) -> dict[str, Any]:
-    ticker = ticker.upper().strip()
-    settings = get_settings()
-    ck = _ck_static(ticker)
-    cached = cache_get(ck)
-    if cached:
-        return cached
+def get_static_data(ticker: str) -> dict:
+    """
+    Datos que NO cambian cada segundo:
+    - nombre, sector, industria, resumen, website (para logo)
+    - dividendos (si vienen), ratios, etc.
+    """
+    ticker = ticker.strip().upper()
 
-    c = RapidYHClient()
-    # Endpoints típicos de YH Finance RapidAPI
-    profile = c.get("stock/v2/get-profile", {"symbol": ticker, "region": "US"})
-    summary = c.get("stock/v2/get-summary", {"symbol": ticker, "region": "US"})
-    payload = {"profile": profile, "summary": summary}
+    # Módulos típicos de Yahoo Finance
+    # (si alguno no existe en esta API, la excepción te mostrará cuál falla)
+    profile = _modules(ticker, "summaryProfile")
+    summary = _modules(ticker, "summaryDetail")
+    stats = _modules(ticker, "defaultKeyStatistics")
 
-    cache_set(ck, payload, ttl_seconds=settings.cache_ttl_static_seconds)
-    return payload
+    return {
+        "profile": profile,
+        "summary": summary,
+        "stats": stats,
+    }
 
-def get_price_data(ticker: str) -> dict[str, Any]:
-    ticker = ticker.upper().strip()
-    settings = get_settings()
-    ck = _ck_price(ticker)
-    cached = cache_get(ck)
-    if cached:
-        return cached
+def get_price_data(ticker: str) -> dict:
+    """
+    Datos que cambian más seguido:
+    - price / market price
+    """
+    ticker = ticker.strip().upper()
+    price = _modules(ticker, "price")
+    return {"price": price}
 
-    c = RapidYHClient()
-    quote = c.get("market/v2/get-quotes", {"symbols": ticker, "region": "US"})
-    payload = {"quote": quote}
-
-    cache_set(ck, payload, ttl_seconds=settings.cache_ttl_price_seconds)
-    return payload
-
+def get_earnings_data(ticker: str) -> dict:
+    ticker = ticker.strip().upper()
+    earnings = _modules(ticker, "earnings")
+    return {"earnings": earnings}
