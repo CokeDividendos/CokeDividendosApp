@@ -1,101 +1,112 @@
 # src/auth.py
 from __future__ import annotations
 
+import json
 import streamlit as st
-from typing import Optional, Dict, Any
 
 from .db import (
-    count_users,
-    create_user,
+    USERS_PATH,
+    ensure_users_file,
     get_user_by_email,
+    has_any_user,
+    hash_password,
     verify_password,
-    init_db,
 )
 
-SESSION_KEY = "auth_user"  # dict con email/is_admin/is_active
+SESSION_KEY = "auth_ok"
+SESSION_EMAIL = "auth_email"
+SESSION_ROLE = "auth_role"
 
 
-def _set_user_session(user: Dict[str, Any]) -> None:
-    st.session_state[SESSION_KEY] = {
-        "email": user["email"],
-        "is_admin": bool(user.get("is_admin", 0)),
-        "is_active": bool(user.get("is_active", 1)),
-    }
+def is_logged_in() -> bool:
+    return bool(st.session_state.get(SESSION_KEY))
 
 
-def current_user() -> Optional[Dict[str, Any]]:
-    return st.session_state.get(SESSION_KEY)
+def current_user_email() -> str:
+    return st.session_state.get(SESSION_EMAIL, "")
 
 
 def logout() -> None:
-    st.session_state.pop(SESSION_KEY, None)
-    # rerun para que se muestre el login
+    st.session_state[SESSION_KEY] = False
+    st.session_state[SESSION_EMAIL] = ""
+    st.session_state[SESSION_ROLE] = ""
     st.rerun()
+
+
+def logout_button(label: str = "Cerrar sesión") -> None:
+    if st.button(label, use_container_width=True):
+        logout()
+
+
+def _setup_screen() -> None:
+    """
+    Setup NO persiste automáticamente en Streamlit Cloud.
+    Por eso generamos el JSON y tú lo copias a data/users.json y lo commiteas.
+    """
+    st.markdown("## 🛠️ Configuración inicial (crear admin)")
+    st.info(
+        "No hay usuarios registrados todavía. "
+        "Aquí puedes generar el contenido de `data/users.json` con un usuario admin.\n\n"
+        "Después **copia el JSON generado** en `data/users.json`, haz commit y redeploy."
+    )
+
+    col1, col2 = st.columns(2)
+    with col1:
+        email = st.text_input("Correo admin", value="cokedividendos@gmail.com")
+    with col2:
+        role = st.selectbox("Rol", ["admin", "user"], index=0)
+
+    pw = st.text_input("Contraseña admin", type="password")
+
+    if st.button("Generar users.json", type="primary"):
+        if not email.strip() or not pw:
+            st.error("Debes ingresar correo y contraseña.")
+            return
+
+        meta = hash_password(pw)
+        payload = {
+            email.strip().lower(): {
+                "role": role,
+                "created_at": "GENERATED_IN_APP",
+                **meta,
+            }
+        }
+        st.success("Listo. Copia este JSON y pégalo en `data/users.json` (y commitea).")
+        st.code(json.dumps(payload, indent=2, ensure_ascii=False), language="json")
+        st.caption(f"Ruta esperada: {USERS_PATH}")
 
 
 def require_login() -> bool:
     """
-    Retorna True si el usuario está autenticado.
-    Si NO hay usuarios en la DB, muestra pantalla de creación del primer admin.
+    Devuelve True si el usuario está logueado. Si no, muestra UI de login/setup y devuelve False.
     """
-    init_db()
+    ensure_users_file()
 
-    user = current_user()
-    if user and user.get("is_active", False):
+    if is_logged_in():
         return True
 
-    # 1) Bootstrap: si no hay usuarios aún, crear admin
-    if count_users() == 0:
-        st.markdown("## 🛠️ Configuración inicial")
-        st.info("No hay usuarios creados. Crea el **primer administrador** para habilitar el acceso.")
-        with st.form("create_admin", clear_on_submit=False):
-            email = st.text_input("Correo (admin)", value="cokedividendos@gmail.com")
-            password = st.text_input("Contraseña (admin)", type="password")
-            password2 = st.text_input("Repite la contraseña", type="password")
-            submitted = st.form_submit_button("Crear administrador")
-        if submitted:
-            if not email.strip():
-                st.error("El correo es obligatorio.")
-                return False
-            if not password:
-                st.error("La contraseña es obligatoria.")
-                return False
-            if password != password2:
-                st.error("Las contraseñas no coinciden.")
-                return False
-
-            # crear admin
-            create_user(email=email.strip(), password=password, is_admin=True, is_active=True)
-            user_db = get_user_by_email(email.strip())
-            _set_user_session(user_db)
-            st.success("Administrador creado. Entrando…")
-            st.rerun()
-
+    # Si no hay usuarios -> pantalla de setup
+    if not has_any_user():
+        _setup_screen()
         return False
 
-    # 2) Login normal
+    # Login normal
     st.markdown("## 🔐 Iniciar sesión")
-    with st.form("login_form", clear_on_submit=False):
-        email = st.text_input("Correo", value="tucorreo@gmail.com")
-        password = st.text_input("Contraseña", type="password")
-        submitted = st.form_submit_button("Entrar")
+    email = st.text_input("Correo", placeholder="tucorreo@gmail.com")
+    password = st.text_input("Contraseña", type="password")
 
-    if submitted:
-        u = get_user_by_email(email.strip())
+    if st.button("Entrar"):
+        u = get_user_by_email(email)
         if not u:
-            st.error("Correo o contraseña incorrectos.")
+            st.error("Usuario no autorizado.")
             return False
-        if not bool(u.get("is_active", 1)):
-            st.error("Tu cuenta está desactivada.")
-            return False
-
-        ok = verify_password(password, u["salt_b64"], u["hash_b64"])
-        if not ok:
-            st.error("Correo o contraseña incorrectos.")
+        if not verify_password(password, u):
+            st.error("Contraseña incorrecta.")
             return False
 
-        _set_user_session(u)
-        st.success("Acceso correcto.")
+        st.session_state[SESSION_KEY] = True
+        st.session_state[SESSION_EMAIL] = email.strip().lower()
+        st.session_state[SESSION_ROLE] = u.get("role", "user")
         st.rerun()
 
     return False
