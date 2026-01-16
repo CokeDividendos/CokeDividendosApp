@@ -118,3 +118,40 @@ def init_db() -> None:
     En este diseño, solo necesitamos asegurar que exista data/users.json.
     """
     ensure_users_file()
+
+# --- SQLite (cache + soporte futuro) ---
+import os
+import sqlite3
+from pathlib import Path
+
+_DB_PATH = Path("data") / "app.sqlite3"
+
+def get_conn() -> sqlite3.Connection:
+    """
+    Devuelve una conexión SQLite lista para usar.
+    Crea data/app.sqlite3 y las tablas necesarias si no existen.
+    """
+    Path("data").mkdir(parents=True, exist_ok=True)
+
+    conn = sqlite3.connect(str(_DB_PATH), check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+
+    # Tabla de caché (para evitar rate-limits / too many requests)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS cache (
+            key TEXT PRIMARY KEY,
+            value_json TEXT NOT NULL,
+            expires_at INTEGER
+        )
+    """)
+    conn.commit()
+    return conn
+
+# --- Compatibility / App bootstrap ---
+def init_db() -> None:
+    """
+    Compatibilidad: el router llama init_db() al iniciar.
+    Aquí aseguramos que exista el storage de usuarios y el SQLite de caché.
+    """
+    ensure_users_file()   # tu JSON de usuarios
+    _ = get_conn()        # crea el SQLite y tabla cache si faltan
