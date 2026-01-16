@@ -5,8 +5,7 @@ from typing import Optional, Tuple
 
 import streamlit as st
 
-# DB en /tmp para Streamlit Cloud (evita problemas de permisos)
-DB_PATH = Path(st.secrets.get("DB_PATH", "/tmp/cokeapp2.sqlite"))
+DB_PATH = Path(st.secrets.get("DB_PATH", "/tmp/cokedividendosapp.sqlite"))
 
 
 def get_conn() -> sqlite3.Connection:
@@ -20,7 +19,7 @@ def init_db() -> None:
     conn = get_conn()
     cur = conn.cursor()
 
-    # Usuarios: email + hash + flag activo
+    # Usuarios
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS users (
@@ -31,15 +30,23 @@ def init_db() -> None:
         """
     )
 
+    # Caché key-value
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS kv_cache (
+            key TEXT PRIMARY KEY,
+            value_json TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            ttl_seconds INTEGER
+        )
+        """
+    )
+
     conn.commit()
     conn.close()
 
 
 def get_user_by_email(email: str) -> Optional[Tuple[str, str, int]]:
-    """
-    Retorna: (email, password_hash, is_active)
-    o None si no existe.
-    """
     email = (email or "").strip().lower()
     if not email:
         return None
