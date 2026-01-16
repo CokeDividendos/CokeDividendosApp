@@ -95,3 +95,9 @@ def cache_clear(prefix: Optional[str] = None) -> None:
         cur.execute("DELETE FROM kv_cache")
     conn.commit()
     conn.close()
+
+# --- Backward compatible alias (do not remove) ---
+def cache_clear_all() -> None:
+    """Compatibilidad: borra todo el cache."""
+    cache_clear(prefix=None)
+
