@@ -110,3 +110,11 @@ def get_user_by_email(email: str) -> Optional[Dict[str, Any]]:
 def has_any_user() -> bool:
     users = load_users()
     return len(users) > 0
+
+# --- Compatibility / App bootstrap ---
+def init_db() -> None:
+    """
+    Compatibilidad: algunas partes del proyecto llaman init_db().
+    En este diseño, solo necesitamos asegurar que exista data/users.json.
+    """
+    ensure_users_file()
