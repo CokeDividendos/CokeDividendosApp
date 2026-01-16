@@ -1,62 +1,76 @@
+# src/db.py
 import sqlite3
-from contextlib import contextmanager
-from typing import Optional, Any
-from src.config import get_settings
+from pathlib import Path
+from typing import Optional, Tuple
 
-def _connect():
-    settings = get_settings()
-    return sqlite3.connect(settings.db_path, check_same_thread=False)
+import streamlit as st
 
-@contextmanager
-def db():
-    conn = _connect()
-    try:
-        yield conn
-    finally:
-        conn.close()
+# DB en /tmp para Streamlit Cloud (evita problemas de permisos)
+DB_PATH = Path(st.secrets.get("DB_PATH", "/tmp/cokeapp2.sqlite"))
+
+
+def get_conn() -> sqlite3.Connection:
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
 
 def init_db() -> None:
-    with db() as conn:
-        cur = conn.cursor()
+    conn = get_conn()
+    cur = conn.cursor()
 
-        # Usuarios
-        cur.execute("""
+    # Usuarios: email + hash + flag activo
+    cur.execute(
+        """
         CREATE TABLE IF NOT EXISTS users (
             email TEXT PRIMARY KEY,
             password_hash TEXT NOT NULL,
-            is_active INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT NOT NULL DEFAULT (datetime('now'))
-        );
-        """)
+            is_active INTEGER NOT NULL DEFAULT 1
+        )
+        """
+    )
 
-        # Cache persistente (2 tipos: static y price)
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS cache (
-            cache_key TEXT PRIMARY KEY,
-            payload_json TEXT NOT NULL,
-            expires_at INTEGER NOT NULL
-        );
-        """)
-        conn.commit()
+    conn.commit()
+    conn.close()
 
-def get_user(email: str) -> Optional[dict[str, Any]]:
-    with db() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT email, password_hash, is_active FROM users WHERE email = ?", (email.lower().strip(),))
-        row = cur.fetchone()
-        if not row:
-            return None
-        return {"email": row[0], "password_hash": row[1], "is_active": bool(row[2])}
 
-def upsert_user(email: str, password_hash: str, is_active: bool = True) -> None:
-    with db() as conn:
-        cur = conn.cursor()
-        cur.execute("""
+def get_user_by_email(email: str) -> Optional[Tuple[str, str, int]]:
+    """
+    Retorna: (email, password_hash, is_active)
+    o None si no existe.
+    """
+    email = (email or "").strip().lower()
+    if not email:
+        return None
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT email, password_hash, is_active FROM users WHERE email = ?", (email,))
+    row = cur.fetchone()
+    conn.close()
+
+    if not row:
+        return None
+    return (row["email"], row["password_hash"], int(row["is_active"]))
+
+
+def upsert_user(email: str, password_hash: str, is_active: int = 1) -> None:
+    email = (email or "").strip().lower()
+    if not email:
+        raise ValueError("Email vacío")
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
         INSERT INTO users(email, password_hash, is_active)
-        VALUES(?, ?, ?)
+        VALUES (?, ?, ?)
         ON CONFLICT(email) DO UPDATE SET
             password_hash=excluded.password_hash,
             is_active=excluded.is_active
-        """, (email.lower().strip(), password_hash, 1 if is_active else 0))
-        conn.commit()
-
+        """,
+        (email, password_hash, int(is_active)),
+    )
+    conn.commit()
+    conn.close()
