@@ -1,3 +1,6 @@
+st.caption("BUILD: 2026-01-19-XYZ")
+
+
 import streamlit as st
 
 from src.services.finance_data import get_static_data, get_price_data
