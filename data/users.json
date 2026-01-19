@@ -6,5 +6,13 @@
     "iterations": "200000",
     "salt_b64": "vAVLAHzPM7e7jfGi81/Rew==",
     "hash_b64": "JLC4+mHCTfChDgWJaxLoz4MVVf7Y972Wrtcle8nY3bw="
+  },
+  "coke.g.castro@gmail.com": {
+    "role": "user",
+    "created_at": "GENERATED_IN_APP",
+    "algo": "pbkdf2_sha256",
+    "iterations": "200000",
+    "salt_b64": "jwW3Sd8ZngofYX7DnG9JUQ==",
+    "hash_b64": "H7DBgaN1UmrZiCxCdEqI93i8ad9w2ndSOBl+XEHYurc="
   }
 }
