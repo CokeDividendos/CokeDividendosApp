@@ -1,6 +1,3 @@
-import os
-from typing import Any, Dict, Optional
-
 import requests
 import streamlit as st
 
@@ -9,88 +6,61 @@ class RapidAPIError(RuntimeError):
     pass
 
 
-def _secret(name: str, default: Optional[str] = None) -> Optional[str]:
-    """
-    Lee secretos de:
-    1) st.secrets (Streamlit Cloud)
-    2) variables de entorno (local / CI)
-    """
+def _secret(name: str, default=None):
     try:
-        if hasattr(st, "secrets") and name in st.secrets:
-            val = st.secrets.get(name)
-            return str(val) if val is not None else default
+        # st.secrets es dict-like
+        return st.secrets.get(name, default)
     except Exception:
-        pass
-
-    val = os.getenv(name)
-    return val if val else default
+        return default
 
 
 RAPIDAPI_KEY = _secret("RAPIDAPI_KEY")
 RAPIDAPI_HOST = _secret("RAPIDAPI_HOST", "yahoo-finance15.p.rapidapi.com")
 RAPIDAPI_BASE_URL = _secret("RAPIDAPI_BASE_URL", "https://yahoo-finance15.p.rapidapi.com")
+RAPIDAPI_API_PREFIX = _secret("RAPIDAPI_API_PREFIX", "/api/v1")
 
 
-def _validate_config() -> None:
-    missing = []
+def rapidapi_get(path: str, params: dict | None = None, timeout: int = 25) -> dict:
     if not RAPIDAPI_KEY:
-        missing.append("RAPIDAPI_KEY")
-    if not RAPIDAPI_HOST:
-        missing.append("RAPIDAPI_HOST")
-    if not RAPIDAPI_BASE_URL:
-        missing.append("RAPIDAPI_BASE_URL")
-
-    if missing:
-        raise RapidAPIError(
-            "Faltan secrets requeridos en st.secrets / env: " + ", ".join(missing)
-        )
-
-    # Normalizamos base URL
-    if "://" not in RAPIDAPI_BASE_URL:
-        raise RapidAPIError("RAPIDAPI_BASE_URL debe incluir https:// (ej: https://yahoo-finance15.p.rapidapi.com)")
-
-
-def rapidapi_get(path: str, params: Optional[Dict[str, Any]] = None, timeout: int = 25) -> Dict[str, Any]:
-    """
-    Llama a RapidAPI. `path` debe comenzar con '/'.
-    Ej: /api/v1/markets/stock/modules
-    """
-    _validate_config()
+        raise RapidAPIError("Falta RAPIDAPI_KEY en st.secrets (Streamlit Cloud → Settings → Secrets).")
 
     if not path.startswith("/"):
         path = "/" + path
 
+    # Si te pasan /markets/... o /stock/..., le anteponemos /api/v1 automáticamente
+    if RAPIDAPI_API_PREFIX and (
+        path.startswith("/markets") or path.startswith("/stock")
+    ):
+        path = RAPIDAPI_API_PREFIX.rstrip("/") + path
+
     url = RAPIDAPI_BASE_URL.rstrip("/") + path
 
     headers = {
-        "x-rapidapi-key": RAPIDAPI_KEY,
-        "x-rapidapi-host": RAPIDAPI_HOST,
+        "X-RapidAPI-Key": RAPIDAPI_KEY,
+        "X-RapidAPI-Host": RAPIDAPI_HOST,
     }
 
     r = requests.get(url, params=params or {}, headers=headers, timeout=timeout)
 
-    # Errores comunes con mensajes útiles
-    if r.status_code == 401:
-        raise RapidAPIError("401 Unauthorized: API key inválida o sin permisos.")
+    # Errores HTTP con contexto útil
     if r.status_code == 403:
         raise RapidAPIError(
-            "403 Forbidden. Causas típicas:\n"
-            "1) No estás suscrito a esta API en RapidAPI (Subscribe).\n"
-            "2) Estás usando un endpoint que tu plan no permite.\n"
-            "3) El host no coincide con el producto (RAPIDAPI_HOST)."
+            "403 Forbidden: normalmente significa que NO estás suscrito al API en RapidAPI, "
+            "o el plan gratuito no permite este endpoint."
         )
     if r.status_code == 429:
-        raise RapidAPIError("429 Too Many Requests: superaste el límite del plan (rate limit).")
+        raise RapidAPIError("429 Too Many Requests: llegaste al límite del plan.")
+    if r.status_code >= 400:
+        snippet = (r.text or "")[:300]
+        raise RapidAPIError(f"HTTP {r.status_code}. Respuesta (primeros 300 chars): {snippet}")
 
+    # Validación JSON (tu error actual)
     try:
-        r.raise_for_status()
-    except requests.HTTPError as e:
-        # Incluye cuerpo si viene en JSON/texto
-        body = None
-        try:
-            body = r.json()
-        except Exception:
-            body = r.text[:500]
-        raise RapidAPIError(f"HTTP {r.status_code} Error: {body}") from e
-
-    return r.json()
+        return r.json()
+    except ValueError:
+        ct = r.headers.get("content-type", "")
+        snippet = (r.text or "")[:300]
+        raise RapidAPIError(
+            f"La respuesta NO es JSON (content-type: {ct}). "
+            f"Primeros 300 chars: {snippet}"
+        )
