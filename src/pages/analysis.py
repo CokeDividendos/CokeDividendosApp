@@ -8,6 +8,9 @@ from src.auth import logout_button
 from src.services.cache_store import cache_clear_all
 
 
+DAILY_LIMIT = 5
+
+
 def _get_user_email() -> str:
     # Intenta varias keys comunes
     candidates = ["user_email", "email", "username", "user", "auth_email", "logged_email"]
@@ -18,34 +21,35 @@ def _get_user_email() -> str:
     return ""
 
 
-def page_analysis():
-    colA, colB = st.columns([0.7, 0.3])
-    with colA:
-        st.title("📊 Análisis Financiero")
-    with colB:
+def _render_sidebar(user_email: str, rem: int | None):
+    with st.sidebar:
+        logout_button()
+
         if st.button("🧹 Limpiar caché", use_container_width=True):
             cache_clear_all()
             st.success("Caché limpiado.")
             st.rerun()
 
-    with st.sidebar:
-        logout_button()
-
-        user_email = _get_user_email()
-        DAILY_LIMIT = 5
-
         if user_email:
-            rem = remaining_searches(user_email, DAILY_LIMIT)
+            if rem is None:
+                rem = remaining_searches(user_email, DAILY_LIMIT)
             st.info(f"🔎 Búsquedas restantes hoy: {rem}/{DAILY_LIMIT}")
         else:
             st.warning("No pude detectar el email del usuario en sesión.")
             with st.expander("Debug: session_state keys"):
-                # no mostramos valores sensibles completos, solo tipo y (si es string) primeros chars
                 for k, v in st.session_state.items():
                     if isinstance(v, str):
                         st.write(f"- {k}: str ({v[:3]}...)")
                     else:
                         st.write(f"- {k}: {type(v).__name__}")
+
+
+def page_analysis():
+    st.title("📊 Análisis Financiero")
+
+    user_email = _get_user_email()
+    rem = remaining_searches(user_email, DAILY_LIMIT) if user_email else None
+    _render_sidebar(user_email, rem)
 
     with st.form("search_form", clear_on_submit=False):
         ticker = st.text_input("Ticker", value="AAPL").strip().upper()
@@ -59,15 +63,15 @@ def page_analysis():
         st.stop()
 
     # Consume SOLO al presionar Buscar
-    user_email = _get_user_email()
-    DAILY_LIMIT = 5
     if user_email:
         ok, rem_after = consume_search(user_email, DAILY_LIMIT, cost=1)
         if not ok:
+            # re-render sidebar con rem=0 para reflejar estado
+            _render_sidebar(user_email, 0)
             st.error("🚫 Búsquedas diarias alcanzadas. Vuelve mañana.")
             st.stop()
-        with st.sidebar:
-            st.info(f"🔎 Búsquedas restantes hoy: {rem_after}/{DAILY_LIMIT}")
+        # re-render sidebar con contador actualizado (sin duplicar)
+        _render_sidebar(user_email, rem_after)
 
     try:
         static = get_static_data(ticker)
