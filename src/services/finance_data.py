@@ -109,16 +109,16 @@ def get_price_data(ticker: str, asset_type: str = "STOCKS") -> dict:
 # -----------------------------
 def _financial_data(ticker: str) -> dict:
     """
-    financial-data vía módulos:
-    GET /v1/stock/modules?symbol=AAPL&module=financial-data
+    Endpoint que en tu RapidAPI da 200 OK:
+    GET /v1/stock/financial-data?ticker=AAPL
     """
     t = ticker.strip().upper()
     cache_key = f"yh:financial-data:{t}"
 
     return rapidapi_cached_get(
         cache_key=cache_key,
-        path="/v1/stock/modules",
-        params={"symbol": t, "module": "financial-data"},
+        path="/v1/stock/financial-data",
+        params={"ticker": t},
         ttl_seconds=14 * 24 * 3600,  # 14 días
         error_ttl_seconds=60,
     )
