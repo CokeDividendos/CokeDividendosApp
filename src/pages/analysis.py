@@ -1,8 +1,10 @@
 import streamlit as st
+
 from src.services.finance_data import get_static_data, get_price_data
 from src.services.logos import logo_candidates
 from src.auth import logout_button
 from src.services.cache_store import cache_clear_all
+
 
 def page_analysis():
     # Header + acciones
@@ -18,7 +20,7 @@ def page_analysis():
     with st.sidebar:
         logout_button()
 
-    ticker = st.text_input("Ticker", value="AAPL")
+    ticker = st.text_input("Ticker", value="AAPL").strip().upper()
     if not ticker:
         st.stop()
 
@@ -26,52 +28,52 @@ def page_analysis():
         static = get_static_data(ticker)
         price = get_price_data(ticker)
 
-        # Perfil
-        prof = static.get("profile", {})
-        summary = static.get("summary", {})
-
-        # intenta dominio/logo desde profile (depende endpoint)
+        # --- Logo (best effort) ---
+        prof = static.get("profile", {}) if isinstance(static, dict) else {}
         website = ""
         try:
             website = prof.get("website") or prof.get("assetProfile", {}).get("website") or ""
         except Exception:
             website = ""
 
-        # Logo
         logo_urls = logo_candidates(website)
         if logo_urls:
             st.image(logo_urls[0], width=64)
 
-        st.subheader(ticker.upper())
+        st.subheader(ticker)
 
-        # Precio (depende endpoint quotes)
-        quote = (price.get("quote") or {}).get("quoteResponse", {}).get("result", [])
-        last_price = None
-        if quote and isinstance(quote, list):
-            last_price = price.get("last_price")
-            currency = price.get("currency") or ""
-            pct = price.get("pct_change")
-            net = price.get("net_change")
-            vol = price.get("volume")
-            asof = price.get("asof") or ""
-            
-            st.metric(
-                "Precio",
-                f"{last_price:.2f} {currency}".strip() if isinstance(last_price, (int, float)) else "N/D",
-                delta=f"{net:+.2f} ({pct:+.2f}%)" if isinstance(net, (int, float)) and isinstance(pct, (int, float)) else None
-            )
+        # --- Precio (del endpoint /api/v1/market/quotes) ---
+        last_price = price.get("last_price")
+        currency = price.get("currency") or ""
+        pct = price.get("pct_change")
+        net = price.get("net_change")
+        vol = price.get("volume")
+        asof = price.get("asof") or ""
 
-            if vol is not None:
-                st.caption(f"Volumen: {vol:,}".replace(",", "."))  # formato CL/ES
-            if asof:
-                st.caption(f"Fecha: {asof}")
+        delta_txt = None
+        if isinstance(net, (int, float)) and isinstance(pct, (int, float)):
+            delta_txt = f"{net:+.2f} ({pct:+.2f}%)"
 
+        st.metric(
+            "Precio",
+            f"{last_price:.2f} {currency}".strip() if isinstance(last_price, (int, float)) else "N/D",
+            delta=delta_txt,
+        )
 
-        st.metric("Precio", f"{last_price}" if last_price is not None else "N/D")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Empresa", price.get("company_name") or "N/D")
+        with col2:
+            st.metric("Exchange", price.get("exchange") or "N/D")
+        with col3:
+            st.metric("Asset Class", price.get("asset_class") or "N/D")
 
-        # Aquí es donde luego enchufamos tus bloques: ratios, gráficos, Weiss, etc.
+        if vol is not None:
+            st.caption(f"Volumen: {vol:,}".replace(",", "."))
+        if asof:
+            st.caption(f"Fecha: {asof}")
+
         st.info("Base OK. Aquí conectamos todos tus bloques de análisis (ratios, gráficos, valoración).")
 
     except Exception as e:
         st.error(f"Ocurrió un error: {e}")
-
