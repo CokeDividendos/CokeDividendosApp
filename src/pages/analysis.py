@@ -48,7 +48,24 @@ def page_analysis():
         quote = (price.get("quote") or {}).get("quoteResponse", {}).get("result", [])
         last_price = None
         if quote and isinstance(quote, list):
-            last_price = quote[0].get("regularMarketPrice")
+            last_price = price.get("last_price")
+            currency = price.get("currency") or ""
+            pct = price.get("pct_change")
+            net = price.get("net_change")
+            vol = price.get("volume")
+            asof = price.get("asof") or ""
+            
+            st.metric(
+                "Precio",
+                f"{last_price:.2f} {currency}".strip() if isinstance(last_price, (int, float)) else "N/D",
+                delta=f"{net:+.2f} ({pct:+.2f}%)" if isinstance(net, (int, float)) and isinstance(pct, (int, float)) else None
+            )
+
+            if vol is not None:
+                st.caption(f"Volumen: {vol:,}".replace(",", "."))  # formato CL/ES
+            if asof:
+                st.caption(f"Fecha: {asof}")
+
 
         st.metric("Precio", f"{last_price}" if last_price is not None else "N/D")
 
