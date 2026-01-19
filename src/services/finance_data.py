@@ -2,11 +2,9 @@
 from __future__ import annotations
 
 from datetime import datetime, date
-from typing import Any, Dict, Callable
+from typing import Any, Callable
 
 import pandas as pd
-import math
-
 
 from src.services.cache_store import cache_get, cache_set
 from src.services.yf_client import install_http_cache, yf_call
@@ -35,6 +33,7 @@ def _json_safe(x: Any) -> Any:
         return {str(k): _json_safe(v) for k, v in x.items()}
     if isinstance(x, (list, tuple, set)):
         return [_json_safe(v) for v in x]
+
     # pandas / numpy
     try:
         import numpy as np
@@ -79,15 +78,19 @@ def _ensure_dt_index(df: pd.DataFrame) -> pd.DataFrame:
     """Normaliza columna Date -> datetime y la deja como índice para graficar."""
     if df is None or df.empty:
         return pd.DataFrame()
+
     if "Date" in df.columns:
         df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-        df = df.dropna(subset=["Date"]).set_index("Date")
-    elif df.index.name is None or str(df.index.dtype) != "datetime64[ns]":
-        try:
-            df.index = pd.to_datetime(df.index, errors="coerce")
-            df = df.dropna()
-        except Exception:
-            pass
+        df = df.dropna(subset=["Date"]).set_index("Date").sort_index()
+        return df
+
+    # Si ya viene como index fecha
+    try:
+        df.index = pd.to_datetime(df.index, errors="coerce")
+        df = df.dropna()
+    except Exception:
+        pass
+
     return df
 
 
@@ -243,7 +246,6 @@ def get_history_daily(ticker: str, years: int = 5) -> pd.DataFrame:
         if df is None or df.empty:
             return []
         df = df.reset_index()
-        # guardamos como lista de dicts (JSON)
         return df.to_dict(orient="records")
 
     records = _cache_get_or_set(key, ttl, _load)
@@ -253,7 +255,7 @@ def get_history_daily(ticker: str, years: int = 5) -> pd.DataFrame:
 
 
 # -----------------------------
-# DRAWDOWN (derivado del history, TTL 6h)
+# DRAWDOWN (TTL 6h)
 # -----------------------------
 def get_drawdown_daily(ticker: str, years: int = 5) -> pd.DataFrame:
     t = ticker.strip().upper()
@@ -266,7 +268,7 @@ def get_drawdown_daily(ticker: str, years: int = 5) -> pd.DataFrame:
             return []
         s = df["Close"].astype(float)
         peak = s.cummax()
-        dd = (s / peak) - 1.0  # en proporción
+        dd = (s / peak) - 1.0
         out = pd.DataFrame(
             {
                 "Date": s.index,
@@ -279,7 +281,7 @@ def get_drawdown_daily(ticker: str, years: int = 5) -> pd.DataFrame:
 
     records = _cache_get_or_set(key, ttl, _load)
     df = _df_from_cached_records(records)
-    df = _ensure_dt_index(df.rename(columns={"Date": "Date"}))
+    df = _ensure_dt_index(df)
     return df
 
 
@@ -309,20 +311,17 @@ def get_perf_metrics(ticker: str, years: int = 5) -> dict:
         start_date = closes.index[0].date().isoformat()
         end_date = closes.index[-1].date().isoformat()
 
-        # CAGR (aprox por días)
         n_days = (closes.index[-1] - closes.index[0]).days
         years_span = n_days / 365.25 if n_days and n_days > 0 else None
         cagr = None
         if years_span and start_price > 0:
             cagr = (end_price / start_price) ** (1.0 / years_span) - 1.0
 
-        # Vol anualizada (returns diarios)
         rets = closes.pct_change().dropna()
         vol = None
         if not rets.empty:
             vol = float(rets.std() * (252 ** 0.5))
 
-        # Max drawdown
         peak = closes.cummax()
         dd = (closes / peak) - 1.0
         max_dd = float(dd.min()) if not dd.empty else None
@@ -340,9 +339,98 @@ def get_perf_metrics(ticker: str, years: int = 5) -> dict:
 
 
 # -----------------------------
-# AGGREGATOR
+# DIVIDENDS (TTL 90 días)
 # -----------------------------
-def (ticker: str) -> dict:
+def get_dividends_series(ticker: str, years: int = 5) -> pd.DataFrame:
+    """
+    Retorna DataFrame con índice datetime y columna 'Dividend'.
+    Cache 90 días.
+    """
+    t = ticker.strip().upper()
+    key = f"yf:divs:{t}:{years}y"
+    ttl = 60 * 60 * 24 * 90
+
+    def _load():
+        import yfinance as yf
+
+        tk = yf.Ticker(t)
+        s = yf_call(lambda: tk.dividends)  # pandas Series
+        if s is None or len(s) == 0:
+            return []
+        s = s.copy()
+        s.index = pd.to_datetime(s.index, errors="coerce")
+        s = s.dropna()
+        if s.empty:
+            return []
+        cutoff = pd.Timestamp.utcnow().tz_localize(None) - pd.Timedelta(days=int(years * 365.25))
+        s = s[s.index >= cutoff]
+        df = pd.DataFrame({"Date": s.index, "Dividend": s.values})
+        return df.to_dict(orient="records")
+
+    records = _cache_get_or_set(key, ttl, _load)
+    df = _df_from_cached_records(records)
+    if df.empty:
+        return pd.DataFrame()
+    df = _ensure_dt_index(df)
+    return df
+
+
+def get_dividends_by_year(ticker: str, years: int = 5) -> pd.DataFrame:
+    df = get_dividends_series(ticker, years=years)
+    if df is None or df.empty or "Dividend" not in df.columns:
+        return pd.DataFrame()
+    annual = df["Dividend"].resample("Y").sum()
+    out = pd.DataFrame({"Year": annual.index.year, "Dividends": annual.values})
+    return out.sort_values("Year")
+
+
+def get_dividend_metrics(ticker: str, years: int = 5) -> dict:
+    """
+    - ttm_dividend: suma últimos 12 meses
+    - ttm_yield: ttm_dividend / last_price
+    - div_cagr: CAGR aprox usando suma anual (primer año vs último año)
+    """
+    t = ticker.strip().upper()
+    key = f"yf:divmetrics:{t}:{years}y"
+    ttl = 60 * 60 * 24 * 90
+
+    def _load():
+        price = get_price_data(t)
+        last_price = price.get("last_price")
+
+        divs = get_dividends_series(t, years=years)
+        if divs is None or divs.empty or "Dividend" not in divs.columns:
+            return {"ttm_dividend": None, "ttm_yield": None, "div_cagr": None}
+
+        cutoff = pd.Timestamp.utcnow().tz_localize(None) - pd.Timedelta(days=365)
+        ttm = float(divs[divs.index >= cutoff]["Dividend"].sum())
+
+        yld = None
+        if isinstance(last_price, (int, float)) and last_price and ttm is not None:
+            yld = ttm / float(last_price)
+
+        annual = get_dividends_by_year(t, years=years)
+        div_cagr = None
+        if annual is not None and not annual.empty and len(annual) >= 2:
+            first = float(annual["Dividends"].iloc[0])
+            last = float(annual["Dividends"].iloc[-1])
+            n = int(annual["Year"].iloc[-1] - annual["Year"].iloc[0])
+            if n > 0 and first > 0 and last > 0:
+                div_cagr = (last / first) ** (1.0 / n) - 1.0
+
+        return {
+            "ttm_dividend": float(ttm) if ttm is not None else None,
+            "ttm_yield": float(yld) if yld is not None else None,
+            "div_cagr": float(div_cagr) if div_cagr is not None else None,
+        }
+
+    return _cache_get_or_set(key, ttl, _load)
+
+
+# -----------------------------
+# AGGREGATOR (mantiene compatibilidad con UI)
+# -----------------------------
+def get_static_data(ticker: str) -> dict:
     q = get_price_data(ticker)
     prof = get_profile_data(ticker)
     fin = get_financial_data(ticker)
@@ -362,104 +450,3 @@ def (ticker: str) -> dict:
         "stats": {},
         "financial": fin,
     }
-
-# -----------------------------
-# DIVIDENDS (TTL 90 días)
-# -----------------------------
-def get_dividends_series(ticker: str, years: int = 5) -> pd.DataFrame:
-    """
-    Retorna DataFrame con índice datetime y columna 'Dividend' (valores).
-    Cache 90 días.
-    """
-    t = ticker.strip().upper()
-    key = f"yf:divs:{t}:{years}y"
-    ttl = 60 * 60 * 24 * 90
-
-    def _load():
-        import yfinance as yf
-
-        tk = yf.Ticker(t)
-        s = yf_call(lambda: tk.dividends)  # pandas Series
-        if s is None or len(s) == 0:
-            return []
-        s = s.copy()
-        s.index = pd.to_datetime(s.index, errors="coerce")
-        s = s.dropna()
-        if s.empty:
-            return []
-        # filtra últimos N años aprox
-        cutoff = pd.Timestamp.utcnow().tz_localize(None) - pd.Timedelta(days=int(years * 365.25))
-        s = s[s.index >= cutoff]
-        df = pd.DataFrame({"Date": s.index, "Dividend": s.values})
-        return df.to_dict(orient="records")
-
-    records = _cache_get_or_set(key, ttl, _load)
-    df = _df_from_cached_records(records)
-    if df.empty:
-        return pd.DataFrame()
-    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-    df = df.dropna(subset=["Date"]).set_index("Date").sort_index()
-    return df
-
-
-def get_dividends_by_year(ticker: str, years: int = 5) -> pd.DataFrame:
-    """
-    Suma anual de dividendos.
-    """
-    df = get_dividends_series(ticker, years=years)
-    if df is None or df.empty:
-        return pd.DataFrame()
-    annual = df["Dividend"].resample("Y").sum()
-    out = pd.DataFrame({"Year": annual.index.year, "Dividends": annual.values})
-    out = out.sort_values("Year")
-    return out
-
-
-def get_dividend_metrics(ticker: str, years: int = 5) -> dict:
-    """
-    - Yield TTM (últimos 12 meses / precio)
-    - CAGR de dividendos (aprox) usando suma anual
-    """
-    t = ticker.strip().upper()
-    key = f"yf:divmetrics:{t}:{years}y"
-    ttl = 60 * 60 * 24 * 90
-
-    def _load():
-        price = get_price_data(t)
-        last_price = price.get("last_price")
-
-        divs = get_dividends_series(t, years=years)
-        if divs is None or divs.empty:
-            return {
-                "ttm_dividend": None,
-                "ttm_yield": None,
-                "div_cagr": None,
-            }
-
-        # TTM dividend
-        cutoff = pd.Timestamp.utcnow().tz_localize(None) - pd.Timedelta(days=365)
-        ttm = divs[divs.index >= cutoff]["Dividend"].sum()
-        ttm = float(ttm) if ttm is not None else None
-
-        # Yield TTM
-        yld = None
-        if isinstance(last_price, (int, float)) and last_price and ttm is not None:
-            yld = ttm / float(last_price)
-
-        # CAGR dividend (aprox) usando anual (primer año vs último año)
-        annual = get_dividends_by_year(t, years=years)
-        div_cagr = None
-        if annual is not None and not annual.empty and len(annual) >= 2:
-            first = float(annual["Dividends"].iloc[0])
-            last = float(annual["Dividends"].iloc[-1])
-            n = (annual["Year"].iloc[-1] - annual["Year"].iloc[0])
-            if n > 0 and first > 0 and last > 0:
-                div_cagr = (last / first) ** (1.0 / n) - 1.0
-
-        return {
-            "ttm_dividend": float(ttm) if ttm is not None else None,
-            "ttm_yield": float(yld) if yld is not None else None,
-            "div_cagr": float(div_cagr) if div_cagr is not None else None,
-        }
-
-    return _cache_get_or_set(key, ttl, _load)
