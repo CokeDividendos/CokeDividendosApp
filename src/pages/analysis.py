@@ -149,34 +149,35 @@ def page_analysis():
 
         st.info("Base OK. Próximo: histórico de precio + dividendos + ratios.")
 
-                # -----------------------------
-                # HISTÓRICO + DRAWDOWN + MÉTRICAS
-                # -----------------------------
-                years = 5
-        
-                perf = get_perf_metrics(ticker, years=years)
-                c1, c2, c3 = st.columns(3)
-                with c1:
-                    st.metric("CAGR (aprox)", f"{perf['cagr']*100:.2f}%" if isinstance(perf.get("cagr"), (int, float)) else "N/D")
-                with c2:
-                    st.metric("Volatilidad anual", f"{perf['volatility']*100:.2f}%" if isinstance(perf.get("volatility"), (int, float)) else "N/D")
-                with c3:
-                    st.metric("Max Drawdown", f"{perf['max_drawdown']*100:.2f}%" if isinstance(perf.get("max_drawdown"), (int, float)) else "N/D")
-        
-                with st.expander("📈 Precio histórico (5Y)", expanded=True):
-                    h = get_history_daily(ticker, years=years)
-                    if h is None or h.empty:
-                        st.warning("Sin datos históricos.")
-                    else:
-                        st.line_chart(h["Close"])
-        
-                with st.expander("📉 Drawdown (5Y)", expanded=False):
-                    dd = get_drawdown_daily(ticker, years=years)
-                    if dd is None or dd.empty or "Drawdown" not in dd.columns:
-                        st.warning("Sin datos de drawdown.")
-                    else:
-                        # Drawdown ya viene en proporción (0 a -1)
-                        st.line_chart(dd["Drawdown"])
+        # -----------------------------
+        # HISTÓRICO + DRAWDOWN + MÉTRICAS
+        # -----------------------------
+        years = 5
+
+        perf = get_perf_metrics(ticker, years=years)
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.metric("CAGR (aprox)", f"{perf['cagr']*100:.2f}%" if isinstance(perf.get("cagr"), (int, float)) else "N/D")
+        with c2:
+            st.metric("Volatilidad anual", f"{perf['volatility']*100:.2f}%" if isinstance(perf.get("volatility"), (int, float)) else "N/D")
+        with c3:
+            st.metric("Max Drawdown", f"{perf['max_drawdown']*100:.2f}%" if isinstance(perf.get("max_drawdown"), (int, float)) else "N/D")
+
+        with st.expander("📈 Precio histórico (5Y)", expanded=True):
+            h = get_history_daily(ticker, years=years)
+            if h is None or h.empty:
+                st.warning("Sin datos históricos.")
+            else:
+                st.line_chart(h["Close"])
+
+        with st.expander("📉 Drawdown (5Y)", expanded=False):
+            dd = get_drawdown_daily(ticker, years=years)
+            if dd is None or dd.empty or "Drawdown" not in dd.columns:
+                st.warning("Sin datos de drawdown.")
+            else:
+                # Drawdown ya viene en proporción (0 a -1)
+                st.line_chart(dd["Drawdown"])
+
 
         
     except Exception as e:
