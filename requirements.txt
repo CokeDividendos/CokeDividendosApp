@@ -4,3 +4,5 @@ numpy
 plotly
 requests
 python-dotenv
+requests-cache
+yfinance
