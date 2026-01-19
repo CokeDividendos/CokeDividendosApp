@@ -17,6 +17,8 @@ SESSION_KEY = "auth_ok"
 SESSION_EMAIL = "auth_email"
 SESSION_ROLE = "auth_role"
 
+def is_admin() -> bool:
+    return st.session_state.get(SESSION_ROLE, "") == "admin"
 
 def is_logged_in() -> bool:
     return bool(st.session_state.get(SESSION_KEY))
