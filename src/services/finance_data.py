@@ -1,8 +1,8 @@
 # src/services/finance_data.py
 from __future__ import annotations
 
-from datetime import datetime, date
-from typing import Any, Dict
+from datetime import datetime, date, timezone
+from typing import Any, Callable
 
 import pandas as pd
 
@@ -22,7 +22,7 @@ install_http_cache(expire_seconds=3600)
 # JSON SAFE HELPERS
 # -----------------------------
 def _json_safe(x: Any) -> Any:
-    """Convierte objetos a tipos JSON serializables (dict/list/str/int/float/bool/None)."""
+    """Convierte objetos a tipos JSON serializables."""
     if x is None:
         return None
     if isinstance(x, (str, int, float, bool)):
@@ -33,7 +33,8 @@ def _json_safe(x: Any) -> Any:
         return {str(k): _json_safe(v) for k, v in x.items()}
     if isinstance(x, (list, tuple, set)):
         return [_json_safe(v) for v in x]
-    # pandas / numpy
+
+    # pandas / numpy scalars
     try:
         import numpy as np
         if isinstance(x, (np.integer,)):
@@ -52,22 +53,99 @@ def _json_safe(x: Any) -> Any:
     except Exception:
         pass
 
-    # fallback: string
     return str(x)
 
 
-def _cache_get_or_set(key: str, ttl: int, fn):
-    hit = cache_get(key)
-    if hit is not None:
-        return hit
-    val = fn()
-    val = _json_safe(val)
-    cache_set(key, val, ttl_seconds=ttl)
-    return val
+def _utc_ts() -> int:
+    return int(datetime.now(timezone.utc).timestamp())
+
+
+def _lock_key(key: str) -> str:
+    return f"{key}:lock"
+
+
+def _data_key(key: str) -> str:
+    return f"{key}:data"
+
+
+def _meta_key(key: str) -> str:
+    return f"{key}:meta"
+
+
+def _try_acquire_lock(key: str, lock_ttl: int = 20) -> bool:
+    """Best-effort lock. Si ya existe, no bloquea."""
+    lk = _lock_key(key)
+    if cache_get(lk) is not None:
+        return False
+    cache_set(lk, {"ts": _utc_ts()}, ttl_seconds=lock_ttl)
+    return True
+
+
+def _release_lock(key: str):
+    # Si tu cache_store no tiene delete, dejamos que expire solo.
+    # (suficiente para un lock best-effort)
+    pass
+
+
+def _cache_get_or_set(
+    key: str,
+    ttl: int,
+    fn: Callable[[], Any],
+    stale_grace_seconds: int = 7 * 24 * 3600,  # cuánto aceptamos devolver stale si falla
+) -> Any:
+    """
+    Cache con:
+    - data: key:data
+    - meta: key:meta {ts}
+    - stale fallback si falla el fetch
+    - lock best-effort para evitar estampida
+    """
+    dkey = _data_key(key)
+    mkey = _meta_key(key)
+
+    cached = cache_get(dkey)
+    meta = cache_get(mkey) or {}
+
+    # Si hay cached y no está vencido -> devuelve
+    if cached is not None and isinstance(meta, dict) and meta.get("ts"):
+        age = _utc_ts() - int(meta["ts"])
+        if age <= ttl:
+            return cached
+
+    # Intentar lock para que solo uno refresque
+    got_lock = _try_acquire_lock(key)
+    if not got_lock:
+        # Otro está refrescando: si tengo cached, lo devuelvo aunque esté viejo (mejor UX)
+        if cached is not None:
+            return cached
+        # si no tengo cached, igual intento (sin lock)
+    try:
+        val = fn()
+        val = _json_safe(val)
+        cache_set(dkey, val, ttl_seconds=ttl + stale_grace_seconds)  # guardamos más tiempo para stale
+        cache_set(mkey, {"ts": _utc_ts()}, ttl_seconds=ttl + stale_grace_seconds)
+        return val
+    except Exception as e:
+        # fallback a stale si existe y no es demasiado antiguo
+        if cached is not None and isinstance(meta, dict) and meta.get("ts"):
+            age = _utc_ts() - int(meta["ts"])
+            if age <= (ttl + stale_grace_seconds):
+                # Marcamos stale si es dict
+                if isinstance(cached, dict):
+                    out = dict(cached)
+                    out["_stale"] = True
+                    out["_stale_age_seconds"] = age
+                    out["_error"] = str(e)
+                    return out
+                return cached
+        raise
+    finally:
+        if got_lock:
+            _release_lock(key)
 
 
 # -----------------------------
-# PRICE
+# PRICE (TTL 1-5 min)
 # -----------------------------
 def get_price_data(ticker: str) -> dict:
     """Precio y métricas diarias (TTL 5 min)."""
@@ -80,9 +158,7 @@ def get_price_data(ticker: str) -> dict:
 
         tk = yf.Ticker(t)
 
-        # fast_info a veces es FastInfo (no JSON)
         fast = yf_call(lambda: getattr(tk, "fast_info", {}) or {})
-        # hacemos dict plano
         fast_dict = _json_safe(fast)
 
         price = fast_dict.get("last_price") or fast_dict.get("lastPrice") or fast_dict.get("last")
@@ -112,7 +188,6 @@ def get_price_data(ticker: str) -> dict:
 
         return {
             "ticker": t,
-            "company_name": None,  # lo llenamos desde profile/info
             "exchange": exchange,
             "asset_class": "STOCKS",
             "last_price": float(price) if price is not None else None,
@@ -121,8 +196,6 @@ def get_price_data(ticker: str) -> dict:
             "volume": vol,
             "currency": currency,
             "asof": asof,
-            # NO guardamos objetos raw; solo dict plano
-            "debug": {"fast_info": fast_dict},
         }
 
     return _cache_get_or_set(key, ttl, _load)
@@ -153,8 +226,8 @@ def get_profile_data(ticker: str) -> dict:
             "city": info.get("city"),
             "address1": info.get("address1"),
             "phone": info.get("phone"),
-            "shortName": info.get("shortName"),
-            "raw": info,  # aquí sí, porque ya lo dejamos JSON-safe
+            "shortName": info.get("shortName") or info.get("longName"),
+            "exchange": info.get("exchange"),
         }
 
     return _cache_get_or_set(key, ttl, _load)
@@ -205,7 +278,7 @@ def get_financial_data(ticker: str) -> dict:
 
 
 # -----------------------------
-# HISTORY (TTL 6h)
+# HISTORY (TTL 6-24h) — aquí 6h
 # -----------------------------
 def get_history_daily(ticker: str, years: int = 5) -> pd.DataFrame:
     t = ticker.strip().upper()
@@ -221,7 +294,6 @@ def get_history_daily(ticker: str, years: int = 5) -> pd.DataFrame:
         if df is None or df.empty:
             return []
         df = df.reset_index()
-        # DataFrame no es JSON → guardamos como lista de dicts
         return df.to_dict(orient="records")
 
     records = _cache_get_or_set(key, ttl, _load)
@@ -240,8 +312,8 @@ def get_static_data(ticker: str) -> dict:
 
     return {
         "profile": {
-            "name": q.get("company_name") or prof.get("shortName") or prof.get("raw", {}).get("shortName"),
-            "exchange": q.get("exchange"),
+            "name": prof.get("shortName") or "N/D",
+            "exchange": q.get("exchange") or prof.get("exchange"),
             "ticker": q.get("ticker"),
             "website": prof.get("website"),
             "sector": prof.get("sector"),
