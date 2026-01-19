@@ -70,20 +70,19 @@ def _to_int(s: str | None) -> int | None:
 
 def _quotes_realtime(ticker: str, asset_type: str = "STOCKS") -> dict:
     """
-    Endpoint comprobado por ti en RapidAPI:
-    GET /api/v1/market/quotes (real-time)
-    URL real: https://yahoo-finance15.p.rapidapi.com/api/v1/market/quotes?...
+    Endpoint según tu cURL:
+    https://yahoo-finance15.p.rapidapi.com/api/v1/markets/quote?ticker=AAPL&type=STOCKS
     """
     t = ticker.strip().upper()
-    cache_key = f"yh:quotes:{asset_type}:{t}"
+    cache_key = f"yh:quote:{asset_type}:{t}"
 
-    # TTL 10 min para precio (si quieres menos, baja a 120s)
     return rapidapi_cached_get(
         cache_key=cache_key,
-        path="/api/v1/market/quotes",
+        path="/api/v1/markets/quote",
         params={"ticker": t, "type": asset_type},
         ttl_seconds=10 * 60,
     )
+
 
 
 def get_price_data(ticker: str, asset_type: str = "STOCKS") -> dict:
