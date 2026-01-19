@@ -1,6 +1,7 @@
 # src/pages/analysis.py
 import streamlit as st
 
+from src.services.finance_data import get_dividends_series, get_dividends_by_year, get_dividend_metrics
 from src.services.usage_limits import remaining_searches, consume_search
 from src.services.finance_data import get_static_data, get_price_data
 from src.services.logos import logo_candidates
@@ -178,6 +179,29 @@ def page_analysis():
                 # Drawdown ya viene en proporción (0 a -1)
                 st.line_chart(dd["Drawdown"])
 
+        # -----------------------------
+        # DIVIDENDOS (5Y)
+        # -----------------------------
+        with st.expander("💸 Dividendos (5Y)", expanded=False):
+            dm = get_dividend_metrics(ticker, years=5)
+
+            d1, d2, d3 = st.columns(3)
+            with d1:
+                st.metric("Dividendo TTM", f"{dm['ttm_dividend']:.2f}" if isinstance(dm.get("ttm_dividend"), (int, float)) else "N/D")
+            with d2:
+                st.metric("Yield TTM", f"{dm['ttm_yield']*100:.2f}%" if isinstance(dm.get("ttm_yield"), (int, float)) else "N/D")
+            with d3:
+                st.metric("CAGR Div (aprox)", f"{dm['div_cagr']*100:.2f}%" if isinstance(dm.get("div_cagr"), (int, float)) else "N/D")
+
+            divs = get_dividends_series(ticker, years=5)
+            if divs is None or divs.empty:
+                st.warning("Sin dividendos disponibles para este ticker.")
+            else:
+                st.line_chart(divs["Dividend"])
+
+            annual = get_dividends_by_year(ticker, years=5)
+            if annual is not None and not annual.empty:
+                st.bar_chart(annual.set_index("Year")["Dividends"])
 
         
     except Exception as e:
