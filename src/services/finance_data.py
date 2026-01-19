@@ -80,7 +80,7 @@ def _quotes_realtime(ticker: str, asset_type: str = "STOCKS") -> dict:
     # TTL 10 min para precio (si quieres menos, baja a 120s)
     return rapidapi_cached_get(
         cache_key=cache_key,
-        path="/api/v1/market/quotes",
+        path="/v1/market/quotes",
         params={"ticker": t, "type": asset_type},
         ttl_seconds=10 * 60,
     )
