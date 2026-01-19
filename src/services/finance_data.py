@@ -73,6 +73,9 @@ def _df_from_cached_records(records: Any) -> pd.DataFrame:
         return pd.DataFrame(records)
     return pd.DataFrame()
 
+def _ts_now_naive() -> pd.Timestamp:
+    """Timestamp 'ahora' en UTC pero sin timezone (naive), para comparar contra índices naive."""
+    return pd.Timestamp.now(tz="UTC").tz_convert(None)
 
 def _ensure_dt_index(df: pd.DataFrame) -> pd.DataFrame:
     """Normaliza columna Date -> datetime y la deja como índice para graficar."""
@@ -343,7 +346,7 @@ def get_perf_metrics(ticker: str, years: int = 5) -> dict:
 # -----------------------------
 def get_dividends_series(ticker: str, years: int = 5) -> pd.DataFrame:
     """
-    Retorna DataFrame con índice datetime y columna 'Dividend'.
+    Retorna DataFrame con índice datetime (naive) y columna 'Dividend'.
     Cache 90 días.
     """
     t = ticker.strip().upper()
@@ -357,13 +360,30 @@ def get_dividends_series(ticker: str, years: int = 5) -> pd.DataFrame:
         s = yf_call(lambda: tk.dividends)  # pandas Series
         if s is None or len(s) == 0:
             return []
+
         s = s.copy()
         s.index = pd.to_datetime(s.index, errors="coerce")
         s = s.dropna()
         if s.empty:
             return []
-        cutoff = pd.Timestamp.utcnow().tz_localize(None) - pd.Timedelta(days=int(years * 365.25))
+
+        # ✅ Normaliza timezone -> naive
+        try:
+            if getattr(s.index, "tz", None) is not None:
+                s.index = s.index.tz_convert(None)
+        except Exception:
+            # fallback si viene tz-localized raro
+            try:
+                s.index = s.index.tz_localize(None)
+            except Exception:
+                pass
+
+        cutoff = _ts_now_naive() - pd.Timedelta(days=int(years * 365.25))
         s = s[s.index >= cutoff]
+
+        if s.empty:
+            return []
+
         df = pd.DataFrame({"Date": s.index, "Dividend": s.values})
         return df.to_dict(orient="records")
 
@@ -371,9 +391,21 @@ def get_dividends_series(ticker: str, years: int = 5) -> pd.DataFrame:
     df = _df_from_cached_records(records)
     if df.empty:
         return pd.DataFrame()
-    df = _ensure_dt_index(df)
-    return df
 
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+    df = df.dropna(subset=["Date"]).set_index("Date").sort_index()
+
+    # ✅ Asegura índice naive por si acaso
+    try:
+        if getattr(df.index, "tz", None) is not None:
+            df.index = df.index.tz_convert(None)
+    except Exception:
+        try:
+            df.index = df.index.tz_localize(None)
+        except Exception:
+            pass
+
+    return df
 
 def get_dividends_by_year(ticker: str, years: int = 5) -> pd.DataFrame:
     df = get_dividends_series(ticker, years=years)
@@ -402,7 +434,7 @@ def get_dividend_metrics(ticker: str, years: int = 5) -> dict:
         if divs is None or divs.empty or "Dividend" not in divs.columns:
             return {"ttm_dividend": None, "ttm_yield": None, "div_cagr": None}
 
-        cutoff = pd.Timestamp.utcnow().tz_localize(None) - pd.Timedelta(days=365)
+        cutoff = _ts_now_naive() - pd.Timedelta(days=365)
         ttm = float(divs[divs.index >= cutoff]["Dividend"].sum())
 
         yld = None
