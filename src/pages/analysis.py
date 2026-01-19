@@ -1,5 +1,3 @@
-st.caption("BUILD: 2026-01-19-XYZ")
-
 
 import streamlit as st
 
@@ -8,6 +6,7 @@ from src.services.logos import logo_candidates
 from src.auth import logout_button
 from src.services.cache_store import cache_clear_all
 
+st.caption("BUILD: 2026-01-19-XYZ")
 
 def page_analysis():
     # Header + acciones
