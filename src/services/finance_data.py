@@ -7,8 +7,7 @@ import pandas as pd
 from src.services.cache_store import cache_get, cache_set
 from src.services.yf_client import install_http_cache, yf_call, YFError
 
-
-# Instala cache HTTP (1h) al importar el módulo
+# Activa cache HTTP global (1 hora) para yfinance
 install_http_cache(expire_seconds=3600)
 
 
@@ -29,19 +28,17 @@ def _cache_get_or_set(key: str, ttl: int, fn):
 
 
 def get_price_data(ticker: str) -> dict:
+    """Precio y métricas diarias: TTL 5 minutos."""
     t = ticker.strip().upper()
     key = f"yf:quote:{t}"
-    ttl = 60 * 5  # 5 min
+    ttl = 60 * 5
 
     def _load():
         import yfinance as yf
         tk = yf.Ticker(t)
-
-        # fast_info suele ser más liviano que info
         fast = yf_call(lambda: getattr(tk, "fast_info", {}) or {})
         price = fast.get("last_price") or fast.get("lastPrice") or fast.get("last_price")
         currency = fast.get("currency")
-        # cambios del día: a veces no vienen; se puede calcular desde history 2d
         hist = yf_call(lambda: tk.history(period="2d", interval="1d"))
         net = pct = vol = asof = None
         if hist is not None and len(hist) >= 1:
@@ -72,9 +69,10 @@ def get_price_data(ticker: str) -> dict:
 
 
 def get_profile_data(ticker: str) -> dict:
+    """Perfil/empresa, TTL 30 días."""
     t = ticker.strip().upper()
     key = f"yf:profile:{t}"
-    ttl = 60 * 60 * 24 * 7  # 7 días
+    ttl = 60 * 60 * 24 * 30
 
     def _load():
         import yfinance as yf
@@ -97,12 +95,10 @@ def get_profile_data(ticker: str) -> dict:
 
 
 def get_financial_data(ticker: str) -> dict:
-    """
-    Snapshot de ratios/valorización (lo más cercano a tu 'financial-data').
-    """
+    """Ratios/valores fundamentales, TTL 90 días."""
     t = ticker.strip().upper()
     key = f"yf:financial:{t}"
-    ttl = 60 * 60 * 24  # 1 día
+    ttl = 60 * 60 * 24 * 90  # 90 días
 
     def _load():
         import yfinance as yf
@@ -140,9 +136,7 @@ def get_financial_data(ticker: str) -> dict:
 
 
 def get_history_daily(ticker: str, years: int = 5) -> pd.DataFrame:
-    """
-    Histórico diario para gráficos/rentabilidad/etc.
-    """
+    """Histórico diario para gráficos. TTL 6 horas."""
     t = ticker.strip().upper()
     key = f"yf:hist:{t}:{years}y"
     ttl = 60 * 60 * 6  # 6h
@@ -161,9 +155,7 @@ def get_history_daily(ticker: str, years: int = 5) -> pd.DataFrame:
 
 
 def get_static_data(ticker: str) -> dict:
-    """
-    Agregador para tu UI.
-    """
+    """Agregador para la UI."""
     q = get_price_data(ticker)
     prof = get_profile_data(ticker)
     fin = get_financial_data(ticker)
