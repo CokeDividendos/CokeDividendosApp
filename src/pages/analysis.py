@@ -8,9 +8,6 @@ from src.auth import logout_button
 from src.services.cache_store import cache_clear_all
 
 
-DAILY_LIMIT = 5
-
-
 def _get_user_email() -> str:
     candidates = ["user_email", "email", "username", "user", "auth_email", "logged_email"]
     for k in candidates:
@@ -20,36 +17,67 @@ def _get_user_email() -> str:
     return ""
 
 
+def _get_user_role() -> str:
+    """
+    Best-effort: intenta detectar rol desde session_state.
+    Ajusta/añade keys si tu auth usa otra.
+    """
+    candidates = ["role", "user_role", "auth_role", "logged_role"]
+    for k in candidates:
+        v = st.session_state.get(k)
+        if isinstance(v, str) and v:
+            return v.strip().lower()
+    return ""
+
+
+def _is_admin() -> bool:
+    role = _get_user_role()
+    if role == "admin":
+        return True
+
+    # Fallback: si tu auth no guarda role, pero sí guarda flags
+    # (ajusta si aplica)
+    if st.session_state.get("is_admin") is True:
+        return True
+
+    return False
+
+
 def page_analysis():
-    st.title("📊 Análisis Financiero")
+    DAILY_LIMIT = 5
 
-    user_email = _get_user_email()
-
-    # --- SIDEBAR (se dibuja UNA sola vez) ---
-    with st.sidebar:
-        logout_button()
-
-        if st.button("🧹 Limpiar caché", use_container_width=True):
+    colA, colB = st.columns([0.7, 0.3])
+    with colA:
+        st.title("📊 Análisis Financiero")
+    with colB:
+        if st.button("🧹 Limpiar caché", use_container_width=True, key="btn_clear_cache"):
             cache_clear_all()
             st.success("Caché limpiado.")
             st.rerun()
 
-        # Placeholder para el contador (lo actualizamos sin redibujar widgets)
-        rem_box = st.empty()
+    user_email = _get_user_email()
+    is_admin = _is_admin()
 
-        if user_email:
-            rem = remaining_searches(user_email, DAILY_LIMIT)
-            rem_box.info(f"🔎 Búsquedas restantes hoy: {rem}/{DAILY_LIMIT}")
+    with st.sidebar:
+        logout_button()  # ojo: en auth.py debe tener key fija (key="logout_button")
+
+        # UI de límites
+        if is_admin:
+            st.success("👑 Admin: sin límite diario (las búsquedas igual alimentan el caché global).")
         else:
-            rem_box.warning("No pude detectar el email del usuario en sesión.")
-            with st.expander("Debug: session_state keys"):
-                for k, v in st.session_state.items():
-                    if isinstance(v, str):
-                        st.write(f"- {k}: str ({v[:3]}...)")
-                    else:
-                        st.write(f"- {k}: {type(v).__name__}")
+            if user_email:
+                rem = remaining_searches(user_email, DAILY_LIMIT)
+                st.info(f"🔎 Búsquedas restantes hoy: {rem}/{DAILY_LIMIT}")
+            else:
+                st.warning("No pude detectar el email del usuario en sesión.")
+                with st.expander("Debug: session_state keys"):
+                    for k, v in st.session_state.items():
+                        if isinstance(v, str):
+                            st.write(f"- {k}: str ({v[:3]}...)")
+                        else:
+                            st.write(f"- {k}: {type(v).__name__}")
 
-    # --- FORM: solo consume cuando presiona Buscar ---
+    # --- FORM: solo consume al presionar Buscar ---
     with st.form("search_form", clear_on_submit=False):
         ticker = st.text_input("Ticker", value="AAPL").strip().upper()
         submitted = st.form_submit_button("🔎 Buscar")
@@ -61,21 +89,15 @@ def page_analysis():
         st.warning("Ingresa un ticker.")
         st.stop()
 
-    # Consume SOLO al presionar Buscar
-    if user_email:
+    # Consume SOLO si NO es admin
+    if (not is_admin) and user_email:
         ok, rem_after = consume_search(user_email, DAILY_LIMIT, cost=1)
         if not ok:
-            # actualiza contador via placeholder
-            with st.sidebar:
-                rem_box.error(f"🔎 Búsquedas restantes hoy: 0/{DAILY_LIMIT}")
             st.error("🚫 Búsquedas diarias alcanzadas. Vuelve mañana.")
             st.stop()
-
-        # actualiza contador via placeholder (sin duplicar botones)
         with st.sidebar:
-            rem_box.info(f"🔎 Búsquedas restantes hoy: {rem_after}/{DAILY_LIMIT}")
+            st.info(f"🔎 Búsquedas restantes hoy: {rem_after}/{DAILY_LIMIT}")
 
-    # --- DATA ---
     try:
         static = get_static_data(ticker)
         price = get_price_data(ticker)
@@ -123,7 +145,7 @@ def page_analysis():
         if asof:
             st.caption(f"Fecha: {asof}")
 
-        st.info("Base OK. Próximo: estados financieros históricos + dividendos + ratios.")
+        st.info("Base OK. Próximo: histórico de precio + dividendos + ratios.")
 
     except Exception as e:
         st.error(f"Ocurrió un error: {e}")
