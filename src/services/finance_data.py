@@ -54,7 +54,6 @@ def _json_safe(x: Any) -> Any:
     except Exception:
         pass
 
-    # fallback: string
     return str(x)
 
 
@@ -73,9 +72,22 @@ def _df_from_cached_records(records: Any) -> pd.DataFrame:
         return pd.DataFrame(records)
     return pd.DataFrame()
 
+
 def _ts_now_naive() -> pd.Timestamp:
-    """Timestamp 'ahora' en UTC pero sin timezone (naive), para comparar contra índices naive."""
+    """Timestamp 'ahora' en UTC, pero naive (sin tz)."""
     return pd.Timestamp.now(tz="UTC").tz_convert(None)
+
+
+def _to_naive_datetime_index(idx: Any) -> Any:
+    """Convierte DatetimeIndex a naive (sin tz) de forma robusta."""
+    try:
+        if isinstance(idx, pd.DatetimeIndex):
+            if idx.tz is not None:
+                return idx.tz_convert(None)
+        return idx
+    except Exception:
+        return idx
+
 
 def _ensure_dt_index(df: pd.DataFrame) -> pd.DataFrame:
     """Normaliza columna Date -> datetime y la deja como índice para graficar."""
@@ -83,14 +95,30 @@ def _ensure_dt_index(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
 
     if "Date" in df.columns:
-        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+        # ✅ utc=True: si el string trae offset (-05:00), queda tz-aware UTC
+        # luego tz_convert(None): lo dejamos naive
+        s = pd.to_datetime(df["Date"], errors="coerce", utc=True)
+        try:
+            s = s.dt.tz_convert(None)
+        except Exception:
+            pass
+        df = df.copy()
+        df["Date"] = s
         df = df.dropna(subset=["Date"]).set_index("Date").sort_index()
+        df.index = _to_naive_datetime_index(df.index)
         return df
 
     # Si ya viene como index fecha
     try:
-        df.index = pd.to_datetime(df.index, errors="coerce")
+        idx = pd.to_datetime(df.index, errors="coerce", utc=True)
+        try:
+            idx = idx.tz_convert(None)
+        except Exception:
+            pass
+        df = df.copy()
+        df.index = idx
         df = df.dropna()
+        df.index = _to_naive_datetime_index(df.index)
     except Exception:
         pass
 
@@ -346,7 +374,7 @@ def get_perf_metrics(ticker: str, years: int = 5) -> dict:
 # -----------------------------
 def get_dividends_series(ticker: str, years: int = 5) -> pd.DataFrame:
     """
-    Retorna DataFrame con índice datetime (naive) y columna 'Dividend'.
+    Retorna DataFrame con índice datetime naive y columna 'Dividend'.
     Cache 90 días.
     """
     t = ticker.strip().upper()
@@ -358,30 +386,23 @@ def get_dividends_series(ticker: str, years: int = 5) -> pd.DataFrame:
 
         tk = yf.Ticker(t)
         s = yf_call(lambda: tk.dividends)  # pandas Series
+
         if s is None or len(s) == 0:
             return []
 
         s = s.copy()
-        s.index = pd.to_datetime(s.index, errors="coerce")
-        s = s.dropna()
-        if s.empty:
-            return []
 
-        # ✅ Normaliza timezone -> naive
-        try:
-            if getattr(s.index, "tz", None) is not None:
-                s.index = s.index.tz_convert(None)
-        except Exception:
-            # fallback si viene tz-localized raro
-            try:
-                s.index = s.index.tz_localize(None)
-            except Exception:
-                pass
+        # ✅ Forzamos UTC y luego naive (esto mata cualquier America/New_York/offset)
+        idx = pd.to_datetime(s.index, errors="coerce", utc=True)
+        idx = idx.tz_convert(None)
+        s.index = idx
+        s = s.dropna()
+        if len(s) == 0:
+            return []
 
         cutoff = _ts_now_naive() - pd.Timedelta(days=int(years * 365.25))
         s = s[s.index >= cutoff]
-
-        if s.empty:
+        if len(s) == 0:
             return []
 
         df = pd.DataFrame({"Date": s.index, "Dividend": s.values})
@@ -389,23 +410,14 @@ def get_dividends_series(ticker: str, years: int = 5) -> pd.DataFrame:
 
     records = _cache_get_or_set(key, ttl, _load)
     df = _df_from_cached_records(records)
+    df = _ensure_dt_index(df)
     if df.empty:
         return pd.DataFrame()
 
-    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-    df = df.dropna(subset=["Date"]).set_index("Date").sort_index()
-
-    # ✅ Asegura índice naive por si acaso
-    try:
-        if getattr(df.index, "tz", None) is not None:
-            df.index = df.index.tz_convert(None)
-    except Exception:
-        try:
-            df.index = df.index.tz_localize(None)
-        except Exception:
-            pass
-
+    # por seguridad: índice naive
+    df.index = _to_naive_datetime_index(df.index)
     return df
+
 
 def get_dividends_by_year(ticker: str, years: int = 5) -> pd.DataFrame:
     df = get_dividends_series(ticker, years=years)
@@ -433,6 +445,10 @@ def get_dividend_metrics(ticker: str, years: int = 5) -> dict:
         divs = get_dividends_series(t, years=years)
         if divs is None or divs.empty or "Dividend" not in divs.columns:
             return {"ttm_dividend": None, "ttm_yield": None, "div_cagr": None}
+
+        # ✅ Safety extra: si por algún motivo viene tz-aware, lo dejamos naive
+        divs = divs.copy()
+        divs.index = _to_naive_datetime_index(divs.index)
 
         cutoff = _ts_now_naive() - pd.Timedelta(days=365)
         ttm = float(divs[divs.index >= cutoff]["Dividend"].sum())
