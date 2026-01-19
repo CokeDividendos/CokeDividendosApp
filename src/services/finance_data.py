@@ -1,8 +1,8 @@
 # src/services/finance_data.py
 from __future__ import annotations
 
-from datetime import datetime, date, timezone
-from typing import Any, Callable
+from datetime import datetime, date
+from typing import Any, Dict, Callable
 
 import pandas as pd
 
@@ -22,7 +22,7 @@ install_http_cache(expire_seconds=3600)
 # JSON SAFE HELPERS
 # -----------------------------
 def _json_safe(x: Any) -> Any:
-    """Convierte objetos a tipos JSON serializables."""
+    """Convierte objetos a tipos JSON serializables (dict/list/str/int/float/bool/None)."""
     if x is None:
         return None
     if isinstance(x, (str, int, float, bool)):
@@ -33,10 +33,10 @@ def _json_safe(x: Any) -> Any:
         return {str(k): _json_safe(v) for k, v in x.items()}
     if isinstance(x, (list, tuple, set)):
         return [_json_safe(v) for v in x]
-
-    # pandas / numpy scalars
+    # pandas / numpy
     try:
         import numpy as np
+
         if isinstance(x, (np.integer,)):
             return int(x)
         if isinstance(x, (np.floating,)):
@@ -53,99 +53,44 @@ def _json_safe(x: Any) -> Any:
     except Exception:
         pass
 
+    # fallback: string
     return str(x)
 
 
-def _utc_ts() -> int:
-    return int(datetime.now(timezone.utc).timestamp())
+def _cache_get_or_set(key: str, ttl: int, fn: Callable[[], Any]):
+    hit = cache_get(key)
+    if hit is not None:
+        return hit
+    val = fn()
+    val = _json_safe(val)
+    cache_set(key, val, ttl_seconds=ttl)
+    return val
 
 
-def _lock_key(key: str) -> str:
-    return f"{key}:lock"
+def _df_from_cached_records(records: Any) -> pd.DataFrame:
+    if isinstance(records, list):
+        return pd.DataFrame(records)
+    return pd.DataFrame()
 
 
-def _data_key(key: str) -> str:
-    return f"{key}:data"
-
-
-def _meta_key(key: str) -> str:
-    return f"{key}:meta"
-
-
-def _try_acquire_lock(key: str, lock_ttl: int = 20) -> bool:
-    """Best-effort lock. Si ya existe, no bloquea."""
-    lk = _lock_key(key)
-    if cache_get(lk) is not None:
-        return False
-    cache_set(lk, {"ts": _utc_ts()}, ttl_seconds=lock_ttl)
-    return True
-
-
-def _release_lock(key: str):
-    # Si tu cache_store no tiene delete, dejamos que expire solo.
-    # (suficiente para un lock best-effort)
-    pass
-
-
-def _cache_get_or_set(
-    key: str,
-    ttl: int,
-    fn: Callable[[], Any],
-    stale_grace_seconds: int = 7 * 24 * 3600,  # cuánto aceptamos devolver stale si falla
-) -> Any:
-    """
-    Cache con:
-    - data: key:data
-    - meta: key:meta {ts}
-    - stale fallback si falla el fetch
-    - lock best-effort para evitar estampida
-    """
-    dkey = _data_key(key)
-    mkey = _meta_key(key)
-
-    cached = cache_get(dkey)
-    meta = cache_get(mkey) or {}
-
-    # Si hay cached y no está vencido -> devuelve
-    if cached is not None and isinstance(meta, dict) and meta.get("ts"):
-        age = _utc_ts() - int(meta["ts"])
-        if age <= ttl:
-            return cached
-
-    # Intentar lock para que solo uno refresque
-    got_lock = _try_acquire_lock(key)
-    if not got_lock:
-        # Otro está refrescando: si tengo cached, lo devuelvo aunque esté viejo (mejor UX)
-        if cached is not None:
-            return cached
-        # si no tengo cached, igual intento (sin lock)
-    try:
-        val = fn()
-        val = _json_safe(val)
-        cache_set(dkey, val, ttl_seconds=ttl + stale_grace_seconds)  # guardamos más tiempo para stale
-        cache_set(mkey, {"ts": _utc_ts()}, ttl_seconds=ttl + stale_grace_seconds)
-        return val
-    except Exception as e:
-        # fallback a stale si existe y no es demasiado antiguo
-        if cached is not None and isinstance(meta, dict) and meta.get("ts"):
-            age = _utc_ts() - int(meta["ts"])
-            if age <= (ttl + stale_grace_seconds):
-                # Marcamos stale si es dict
-                if isinstance(cached, dict):
-                    out = dict(cached)
-                    out["_stale"] = True
-                    out["_stale_age_seconds"] = age
-                    out["_error"] = str(e)
-                    return out
-                return cached
-        raise
-    finally:
-        if got_lock:
-            _release_lock(key)
+def _ensure_dt_index(df: pd.DataFrame) -> pd.DataFrame:
+    """Normaliza columna Date -> datetime y la deja como índice para graficar."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+    if "Date" in df.columns:
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+        df = df.dropna(subset=["Date"]).set_index("Date")
+    elif df.index.name is None or str(df.index.dtype) != "datetime64[ns]":
+        try:
+            df.index = pd.to_datetime(df.index, errors="coerce")
+            df = df.dropna()
+        except Exception:
+            pass
+    return df
 
 
 # -----------------------------
-# PRICE (TTL 1-5 min)
+# PRICE (TTL 5 min)
 # -----------------------------
 def get_price_data(ticker: str) -> dict:
     """Precio y métricas diarias (TTL 5 min)."""
@@ -188,6 +133,7 @@ def get_price_data(ticker: str) -> dict:
 
         return {
             "ticker": t,
+            "company_name": None,  # se llena desde profile/info
             "exchange": exchange,
             "asset_class": "STOCKS",
             "last_price": float(price) if price is not None else None,
@@ -196,6 +142,7 @@ def get_price_data(ticker: str) -> dict:
             "volume": vol,
             "currency": currency,
             "asof": asof,
+            "debug": {"fast_info": fast_dict},
         }
 
     return _cache_get_or_set(key, ttl, _load)
@@ -226,8 +173,8 @@ def get_profile_data(ticker: str) -> dict:
             "city": info.get("city"),
             "address1": info.get("address1"),
             "phone": info.get("phone"),
-            "shortName": info.get("shortName") or info.get("longName"),
-            "exchange": info.get("exchange"),
+            "shortName": info.get("shortName"),
+            "raw": info,
         }
 
     return _cache_get_or_set(key, ttl, _load)
@@ -278,7 +225,7 @@ def get_financial_data(ticker: str) -> dict:
 
 
 # -----------------------------
-# HISTORY (TTL 6-24h) — aquí 6h
+# HISTORY (TTL 6h)
 # -----------------------------
 def get_history_daily(ticker: str, years: int = 5) -> pd.DataFrame:
     t = ticker.strip().upper()
@@ -294,12 +241,100 @@ def get_history_daily(ticker: str, years: int = 5) -> pd.DataFrame:
         if df is None or df.empty:
             return []
         df = df.reset_index()
+        # guardamos como lista de dicts (JSON)
         return df.to_dict(orient="records")
 
     records = _cache_get_or_set(key, ttl, _load)
-    if isinstance(records, list):
-        return pd.DataFrame(records)
-    return pd.DataFrame()
+    df = _df_from_cached_records(records)
+    df = _ensure_dt_index(df)
+    return df
+
+
+# -----------------------------
+# DRAWDOWN (derivado del history, TTL 6h)
+# -----------------------------
+def get_drawdown_daily(ticker: str, years: int = 5) -> pd.DataFrame:
+    t = ticker.strip().upper()
+    key = f"yf:dd:{t}:{years}y"
+    ttl = 60 * 60 * 6
+
+    def _load():
+        df = get_history_daily(t, years=years)
+        if df is None or df.empty or "Close" not in df.columns:
+            return []
+        s = df["Close"].astype(float)
+        peak = s.cummax()
+        dd = (s / peak) - 1.0  # en proporción
+        out = pd.DataFrame(
+            {
+                "Date": s.index,
+                "Close": s.values,
+                "Peak": peak.values,
+                "Drawdown": dd.values,
+            }
+        )
+        return out.to_dict(orient="records")
+
+    records = _cache_get_or_set(key, ttl, _load)
+    df = _df_from_cached_records(records)
+    df = _ensure_dt_index(df.rename(columns={"Date": "Date"}))
+    return df
+
+
+# -----------------------------
+# PERFORMANCE METRICS (TTL 6h)
+# -----------------------------
+def get_perf_metrics(ticker: str, years: int = 5) -> dict:
+    t = ticker.strip().upper()
+    key = f"yf:perf:{t}:{years}y"
+    ttl = 60 * 60 * 6
+
+    def _load():
+        df = get_history_daily(t, years=years)
+        if df is None or df.empty or "Close" not in df.columns:
+            return {
+                "years": years,
+                "cagr": None,
+                "volatility": None,
+                "max_drawdown": None,
+                "start": None,
+                "end": None,
+            }
+
+        closes = df["Close"].astype(float)
+        start_price = float(closes.iloc[0])
+        end_price = float(closes.iloc[-1])
+        start_date = closes.index[0].date().isoformat()
+        end_date = closes.index[-1].date().isoformat()
+
+        # CAGR (aprox por días)
+        n_days = (closes.index[-1] - closes.index[0]).days
+        years_span = n_days / 365.25 if n_days and n_days > 0 else None
+        cagr = None
+        if years_span and start_price > 0:
+            cagr = (end_price / start_price) ** (1.0 / years_span) - 1.0
+
+        # Vol anualizada (returns diarios)
+        rets = closes.pct_change().dropna()
+        vol = None
+        if not rets.empty:
+            vol = float(rets.std() * (252 ** 0.5))
+
+        # Max drawdown
+        peak = closes.cummax()
+        dd = (closes / peak) - 1.0
+        max_dd = float(dd.min()) if not dd.empty else None
+
+        return {
+            "years": years,
+            "cagr": float(cagr) if cagr is not None else None,
+            "volatility": float(vol) if vol is not None else None,
+            "max_drawdown": float(max_dd) if max_dd is not None else None,
+            "start": start_date,
+            "end": end_date,
+        }
+
+    return _cache_get_or_set(key, ttl, _load)
 
 
 # -----------------------------
@@ -312,8 +347,10 @@ def get_static_data(ticker: str) -> dict:
 
     return {
         "profile": {
-            "name": prof.get("shortName") or "N/D",
-            "exchange": q.get("exchange") or prof.get("exchange"),
+            "name": q.get("company_name")
+            or prof.get("shortName")
+            or (prof.get("raw", {}) or {}).get("shortName"),
+            "exchange": q.get("exchange"),
             "ticker": q.get("ticker"),
             "website": prof.get("website"),
             "sector": prof.get("sector"),
