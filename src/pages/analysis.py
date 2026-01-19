@@ -1,3 +1,4 @@
+# src/pages/analysis.py
 import streamlit as st
 
 from src.services.usage_limits import remaining_searches, consume_search
@@ -6,15 +7,12 @@ from src.services.logos import logo_candidates
 from src.auth import logout_button
 from src.services.cache_store import cache_clear_all
 
-# Si ya no lo necesitas después, bórralo
+# Remove this line once deploy is stable
 st.caption("BUILD: 2026-01-19-XYZ")
 
 
 def _get_user_email() -> str:
-    """
-    Intenta encontrar el email del usuario autenticado desde session_state.
-    Ajusta aquí si tu auth usa otra clave.
-    """
+    """Extrae el correo del usuario desde session_state."""
     for k in ("user_email", "email", "username", "user"):
         v = st.session_state.get(k)
         if isinstance(v, str) and "@" in v:
@@ -23,7 +21,6 @@ def _get_user_email() -> str:
 
 
 def page_analysis():
-    # Header + acciones
     colA, colB = st.columns([0.7, 0.3])
     with colA:
         st.title("📊 Análisis Financiero")
@@ -33,20 +30,17 @@ def page_analysis():
             st.success("Caché limpiado.")
             st.rerun()
 
-    # Sidebar
     with st.sidebar:
         logout_button()
-
         user_email = _get_user_email()
-        DAILY_LIMIT = 5  # cambia a 3 si quieres
-
+        DAILY_LIMIT = 5
         if user_email:
             rem = remaining_searches(user_email, DAILY_LIMIT)
             st.info(f"🔎 Búsquedas restantes hoy: {rem}/{DAILY_LIMIT}")
         else:
-            st.warning("No pude detectar el email del usuario en sesión. Revisa session_state keys.")
+            st.warning("No pude detectar el correo del usuario en sesión.")
 
-    # Formulario para no disparar requests al escribir
+    # Formulario evita ejecutar on-change
     with st.form("search_form", clear_on_submit=False):
         ticker = st.text_input("Ticker", value="AAPL").strip().upper()
         submitted = st.form_submit_button("🔎 Buscar")
@@ -58,38 +52,27 @@ def page_analysis():
         st.warning("Ingresa un ticker.")
         st.stop()
 
-    # Límite diario: consume SOLO al buscar
     user_email = _get_user_email()
     DAILY_LIMIT = 5
     if user_email:
         ok, rem_after = consume_search(user_email, DAILY_LIMIT, cost=1)
         if not ok:
-            st.error("🚫 Búsquedas diarias alcanzadas. Vuelve mañana cuando se reinicie el contador.")
+            st.error("🚫 Búsquedas diarias alcanzadas. Vuelve mañana.")
             st.stop()
-        # Refresca contador visible
         with st.sidebar:
             st.info(f"🔎 Búsquedas restantes hoy: {rem_after}/{DAILY_LIMIT}")
 
     try:
-        # Carga datos (con caché en backend)
         static = get_static_data(ticker)
         price = get_price_data(ticker)
 
-        # --- Logo (best effort) ---
         prof = static.get("profile", {}) if isinstance(static, dict) else {}
-        website = ""
-        try:
-            website = prof.get("website") or ""
-        except Exception:
-            website = ""
-
+        website = prof.get("website") or ""
         logo_urls = logo_candidates(website)
         if logo_urls:
             st.image(logo_urls[0], width=64)
-
         st.subheader(ticker)
 
-        # --- Precio ---
         last_price = price.get("last_price")
         currency = price.get("currency") or ""
         pct = price.get("pct_change")
@@ -97,9 +80,11 @@ def page_analysis():
         vol = price.get("volume")
         asof = price.get("asof") or ""
 
-        delta_txt = None
-        if isinstance(net, (int, float)) and isinstance(pct, (int, float)):
-            delta_txt = f"{net:+.2f} ({pct:+.2f}%)"
+        delta_txt = (
+            f"{net:+.2f} ({pct:+.2f}%)"
+            if isinstance(net, (int, float)) and isinstance(pct, (int, float))
+            else None
+        )
 
         st.metric(
             "Precio",
@@ -120,12 +105,10 @@ def page_analysis():
                 st.caption(f"Volumen: {int(vol):,}".replace(",", "."))
             except Exception:
                 st.caption(f"Volumen: {vol}")
-
         if asof:
             st.caption(f"Fecha: {asof}")
 
-        # Aquí después enchufamos: stats, financials, dividends, valuation blocks
-        st.info("Base OK. Próximo: integrar estadísticas, estados financieros, dividendos y ratios con caché trimestral.")
+        st.info("Base OK. Próximo: conectar estadísticas, estados financieros y dividendos con TTL trimestral.")
 
     except Exception as e:
         st.error(f"Ocurrió un error: {e}")
