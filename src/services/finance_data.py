@@ -1,277 +1,183 @@
 # src/services/finance_data.py
 from __future__ import annotations
 
-import re
-from src.services.rapidapi_client import rapidapi_cached_get, RapidAPIError
+from datetime import datetime
+import pandas as pd
+
+from src.services.cache_store import cache_get, cache_set
+from src.services.yf_client import install_http_cache, yf_call, YFError
 
 
-# -----------------------------
-# Helpers
-# -----------------------------
-def _to_float_money(s: str | None) -> float | None:
-    if s is None:
-        return None
-    if not isinstance(s, str):
-        try:
-            return float(s)
-        except Exception:
-            return None
-    cleaned = s.strip()
-    cleaned = cleaned.replace("$", "").replace("€", "").replace("£", "")
-    cleaned = cleaned.replace(",", "")
-    cleaned = re.sub(r"[^0-9\.\-]", "", cleaned)
+# Instala cache HTTP (1h) al importar el módulo
+install_http_cache(expire_seconds=3600)
+
+
+class FinanceDataError(RuntimeError):
+    pass
+
+
+def _cache_get_or_set(key: str, ttl: int, fn):
+    hit = cache_get(key)
+    if hit is not None:
+        return hit
     try:
-        return float(cleaned)
-    except Exception:
-        return None
+        val = fn()
+    except Exception as e:
+        raise FinanceDataError(str(e))
+    cache_set(key, val, ttl_seconds=ttl)
+    return val
 
 
-def _to_float_percent(s: str | None) -> float | None:
-    if s is None:
-        return None
-    if not isinstance(s, str):
-        try:
-            return float(s)
-        except Exception:
-            return None
-    cleaned = s.strip().replace("%", "").replace(",", "")
-    cleaned = re.sub(r"[^0-9\.\-]", "", cleaned)
-    try:
-        return float(cleaned)
-    except Exception:
-        return None
-
-
-def _to_int(s: str | None) -> int | None:
-    if s is None:
-        return None
-    if not isinstance(s, str):
-        try:
-            return int(s)
-        except Exception:
-            return None
-    cleaned = s.strip().replace(",", "")
-    cleaned = re.sub(r"[^0-9\-]", "", cleaned)
-    try:
-        return int(cleaned)
-    except Exception:
-        return None
-
-
-def _raw_val(x):
-    if isinstance(x, dict):
-        return x.get("raw")
-    return x
-
-
-def _cached_get_fallback(cache_key_base: str, paths: list[str], params: dict, ttl: int, err_ttl: int) -> dict:
-    """
-    Prueba múltiples paths (por si el provider usa /api/v1/... vs /v1/...).
-    Cachea por path.
-    """
-    last_err = None
-    for p in paths:
-        try:
-            return rapidapi_cached_get(
-                cache_key=f"{cache_key_base}:{p}",
-                path=p,
-                params=params,
-                ttl_seconds=ttl,
-                error_ttl_seconds=err_ttl,
-            )
-        except RapidAPIError as e:
-            last_err = e
-            # Si es 404, probamos el siguiente path
-            if "HTTP 404" in str(e) or "does not exist" in str(e):
-                continue
-            # Si no es 404, re-lanzamos
-            raise
-    # Si todos fallan, devolvemos el último error
-    raise last_err or RapidAPIError("No se pudo obtener respuesta (fallback sin error).")
-
-
-# -----------------------------
-# QUOTE (real-time-ish)
-# -----------------------------
-def _quote(ticker: str, asset_type: str = "STOCKS") -> dict:
+def get_price_data(ticker: str) -> dict:
     t = ticker.strip().upper()
-    cache_key = f"yh:quote:{asset_type}:{t}"
+    key = f"yf:quote:{t}"
+    ttl = 60 * 5  # 5 min
 
-    # ESTE ya sabemos que funciona con /api/v1/...
-    return rapidapi_cached_get(
-        cache_key=cache_key,
-        path="/api/v1/markets/quote",
-        params={"ticker": t, "type": asset_type},
-        ttl_seconds=10 * 60,
-        error_ttl_seconds=45,
-    )
+    def _load():
+        import yfinance as yf
+        tk = yf.Ticker(t)
 
+        # fast_info suele ser más liviano que info
+        fast = yf_call(lambda: getattr(tk, "fast_info", {}) or {})
+        price = fast.get("last_price") or fast.get("lastPrice") or fast.get("last_price")
+        currency = fast.get("currency")
+        # cambios del día: a veces no vienen; se puede calcular desde history 2d
+        hist = yf_call(lambda: tk.history(period="2d", interval="1d"))
+        net = pct = vol = asof = None
+        if hist is not None and len(hist) >= 1:
+            last_close = float(hist["Close"].iloc[-1])
+            asof = str(hist.index[-1].date())
+            vol = int(hist["Volume"].iloc[-1]) if "Volume" in hist else None
+            price = float(price) if price is not None else last_close
+            if len(hist) >= 2:
+                prev_close = float(hist["Close"].iloc[-2])
+                net = last_close - prev_close
+                pct = (net / prev_close) * 100 if prev_close else None
 
-def get_price_data(ticker: str, asset_type: str = "STOCKS") -> dict:
-    raw = _quote(ticker, asset_type=asset_type)
-    body = (raw or {}).get("body") or {}
-    primary = body.get("primaryData") or {}
+        return {
+            "ticker": t,
+            "company_name": None,
+            "exchange": fast.get("exchange"),
+            "asset_class": "STOCKS",
+            "last_price": float(price) if price is not None else None,
+            "net_change": float(net) if net is not None else None,
+            "pct_change": float(pct) if pct is not None else None,
+            "volume": vol,
+            "currency": currency,
+            "asof": asof,
+            "raw": {"fast_info": fast},
+        }
 
-    last = _to_float_money(primary.get("lastSalePrice"))
-    net_change = _to_float_money(primary.get("netChange"))
-    pct_change = _to_float_percent(primary.get("percentageChange"))
-    volume = _to_int(primary.get("volume"))
-    currency = primary.get("currency")
-    asof = primary.get("lastTradeTimestamp") or None
-
-    return {
-        "ticker": body.get("symbol") or ticker.strip().upper(),
-        "company_name": body.get("companyName"),
-        "exchange": body.get("exchange"),
-        "asset_class": body.get("assetClass"),
-        "last_price": last,
-        "net_change": net_change,
-        "pct_change": pct_change,
-        "volume": volume,
-        "currency": currency,
-        "asof": asof,
-        "raw": raw,
-    }
-
-
-# -----------------------------
-# FINANCIAL DATA
-# -----------------------------
-def _financial_data(ticker: str) -> dict:
-    """
-    Obtiene datos financieros del ticker.
-
-    Este cliente intenta varias rutas ya que la API de RapidAPI puede exponer
-    diferentes prefijos ("/api/v1" vs "/v1") o agrupar este módulo bajo
-    `/stock/financial-data` o `/stock/modules`. Para maximizar la compatibilidad,
-    probamos secuencialmente y retornamos el primer resultado válido.
-
-    Si todas las rutas fallan con 404 u otro error, se propaga la última
-    excepción.
-    """
-    t = ticker.strip().upper()
-    # Lista de (ruta, params) a probar.
-    candidates = [
-        ("/api/v1/stock/financial-data", {"ticker": t}),
-        ("/v1/stock/financial-data", {"ticker": t}),
-        ("/api/v1/stock/modules", {"ticker": t, "module": "financial-data"}),
-        ("/v1/stock/modules", {"symbol": t, "module": "financial-data"}),
-    ]
-    last_err: RapidAPIError | None = None
-    for path, params in candidates:
-        try:
-            # Incluye la ruta en la clave de caché para que no colisionen
-            cache_key = f"yh:financial-data:{t}:{path}"
-            data = rapidapi_cached_get(
-                cache_key=cache_key,
-                path=path,
-                params=params,
-                ttl_seconds=14 * 24 * 3600,  # 14 días
-                error_ttl_seconds=60,
-            )
-            return data
-        except RapidAPIError as err:
-            last_err = err
-            # Si es 404, probamos el siguiente candidato
-            continue
-    # Si ninguna ruta funcionó, lanzamos el último error registrado
-    if last_err:
-        raise last_err
-    raise RapidAPIError("No se pudo obtener financial-data y no se generó error")
-
-
-def get_financial_data(ticker: str) -> dict:
-    raw = _financial_data(ticker)
-    body = (raw or {}).get("body") or {}
-
-    return {
-        "financial_currency": body.get("financialCurrency"),
-        "current_price": _raw_val(body.get("currentPrice")),
-        "target_high_price": _raw_val(body.get("targetHighPrice")),
-        "target_low_price": _raw_val(body.get("targetLowPrice")),
-        "target_mean_price": _raw_val(body.get("targetMeanPrice")),
-        "target_median_price": _raw_val(body.get("targetMedianPrice")),
-        "recommendation_key": body.get("recommendationKey"),
-        "recommendation_mean": _raw_val(body.get("recommendationMean")),
-        "analyst_opinions": _raw_val(body.get("numberOfAnalystOpinions")),
-        "total_cash": _raw_val(body.get("totalCash")),
-        "total_debt": _raw_val(body.get("totalDebt")),
-        "ebitda": _raw_val(body.get("ebitda")),
-        "total_revenue": _raw_val(body.get("totalRevenue")),
-        "gross_profits": _raw_val(body.get("grossProfits")),
-        "free_cashflow": _raw_val(body.get("freeCashflow")),
-        "operating_cashflow": _raw_val(body.get("operatingCashflow")),
-        "quick_ratio": _raw_val(body.get("quickRatio")),
-        "current_ratio": _raw_val(body.get("currentRatio")),
-        "debt_to_equity": _raw_val(body.get("debtToEquity")),
-        "roe": _raw_val(body.get("returnOnEquity")),
-        "roa": _raw_val(body.get("returnOnAssets")),
-        "earnings_growth": _raw_val(body.get("earningsGrowth")),
-        "revenue_growth": _raw_val(body.get("revenueGrowth")),
-        "gross_margins": _raw_val(body.get("grossMargins")),
-        "ebitda_margins": _raw_val(body.get("ebitdaMargins")),
-        "operating_margins": _raw_val(body.get("operatingMargins")),
-        "profit_margins": _raw_val(body.get("profitMargins")),
-        "raw": raw,
-    }
-
-
-# -----------------------------
-# PROFILE (asset-profile)
-# -----------------------------
-def _profile(ticker: str) -> dict:
-    t = ticker.strip().upper()
-    return _cached_get_fallback(
-        cache_key_base=f"yh:profile:{t}",
-        paths=[
-            "/api/v1/stock/profile",
-            "/v1/stock/profile",
-        ],
-        params={"ticker": t},
-        ttl=30 * 24 * 3600,
-        err_ttl=60,
-    )
+    return _cache_get_or_set(key, ttl, _load)
 
 
 def get_profile_data(ticker: str) -> dict:
-    raw = _profile(ticker)
-    body = (raw or {}).get("body") or {}
+    t = ticker.strip().upper()
+    key = f"yf:profile:{t}"
+    ttl = 60 * 60 * 24 * 7  # 7 días
 
-    return {
-        "website": body.get("website"),
-        "industry": body.get("industryDisp") or body.get("industry"),
-        "sector": body.get("sectorDisp") or body.get("sector"),
-        "employees": body.get("fullTimeEmployees"),
-        "summary": body.get("longBusinessSummary"),
-        "country": body.get("country"),
-        "city": body.get("city"),
-        "address": body.get("address1"),
-        "phone": body.get("phone"),
-        "raw": raw,
-    }
+    def _load():
+        import yfinance as yf
+        tk = yf.Ticker(t)
+        info = yf_call(lambda: tk.info or {})
+        return {
+            "website": info.get("website"),
+            "industry": info.get("industry"),
+            "sector": info.get("sector"),
+            "longBusinessSummary": info.get("longBusinessSummary"),
+            "fullTimeEmployees": info.get("fullTimeEmployees"),
+            "country": info.get("country"),
+            "city": info.get("city"),
+            "address1": info.get("address1"),
+            "phone": info.get("phone"),
+            "raw": info,
+        }
+
+    return _cache_get_or_set(key, ttl, _load)
 
 
-# -----------------------------
-# STATIC DATA
-# -----------------------------
+def get_financial_data(ticker: str) -> dict:
+    """
+    Snapshot de ratios/valorización (lo más cercano a tu 'financial-data').
+    """
+    t = ticker.strip().upper()
+    key = f"yf:financial:{t}"
+    ttl = 60 * 60 * 24  # 1 día
+
+    def _load():
+        import yfinance as yf
+        tk = yf.Ticker(t)
+        info = yf_call(lambda: tk.info or {})
+
+        return {
+            "financial_currency": info.get("financialCurrency") or info.get("currency"),
+            "current_price": info.get("currentPrice"),
+            "target_mean_price": info.get("targetMeanPrice"),
+            "recommendation_key": info.get("recommendationKey"),
+            "analyst_opinions": info.get("numberOfAnalystOpinions"),
+            "total_cash": info.get("totalCash"),
+            "total_debt": info.get("totalDebt"),
+            "ebitda": info.get("ebitda"),
+            "total_revenue": info.get("totalRevenue"),
+            "gross_profits": info.get("grossProfits"),
+            "free_cashflow": info.get("freeCashflow"),
+            "operating_cashflow": info.get("operatingCashflow"),
+            "quick_ratio": info.get("quickRatio"),
+            "current_ratio": info.get("currentRatio"),
+            "debt_to_equity": info.get("debtToEquity"),
+            "roe": info.get("returnOnEquity"),
+            "roa": info.get("returnOnAssets"),
+            "earnings_growth": info.get("earningsGrowth"),
+            "revenue_growth": info.get("revenueGrowth"),
+            "gross_margins": info.get("grossMargins"),
+            "ebitda_margins": info.get("ebitdaMargins"),
+            "operating_margins": info.get("operatingMargins"),
+            "profit_margins": info.get("profitMargins"),
+            "raw": info,
+        }
+
+    return _cache_get_or_set(key, ttl, _load)
+
+
+def get_history_daily(ticker: str, years: int = 5) -> pd.DataFrame:
+    """
+    Histórico diario para gráficos/rentabilidad/etc.
+    """
+    t = ticker.strip().upper()
+    key = f"yf:hist:{t}:{years}y"
+    ttl = 60 * 60 * 6  # 6h
+
+    def _load():
+        import yfinance as yf
+        tk = yf.Ticker(t)
+        period = f"{years}y"
+        df = yf_call(lambda: tk.history(period=period, interval="1d", auto_adjust=True))
+        if df is None or df.empty:
+            return pd.DataFrame()
+        df = df.reset_index()
+        return df
+
+    return _cache_get_or_set(key, ttl, _load)
+
+
 def get_static_data(ticker: str) -> dict:
+    """
+    Agregador para tu UI.
+    """
     q = get_price_data(ticker)
-    fin = get_financial_data(ticker)
     prof = get_profile_data(ticker)
+    fin = get_financial_data(ticker)
 
     return {
         "profile": {
-            "name": q.get("company_name"),
+            "name": q.get("company_name") or prof.get("raw", {}).get("shortName"),
             "exchange": q.get("exchange"),
             "ticker": q.get("ticker"),
             "website": prof.get("website"),
             "sector": prof.get("sector"),
             "industry": prof.get("industry"),
         },
-        "summary": {
-            "business_summary": prof.get("summary"),
-            "employees": prof.get("employees"),
-        },
+        "summary": {},
         "stats": {},
         "financial": fin,
     }
