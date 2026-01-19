@@ -6,7 +6,7 @@ from src.services.rapidapi_client import rapidapi_cached_get, RapidAPIError
 
 
 # -----------------------------
-# Helpers de parseo
+# Helpers
 # -----------------------------
 def _to_float_money(s: str | None) -> float | None:
     if s is None:
@@ -16,12 +16,10 @@ def _to_float_money(s: str | None) -> float | None:
             return float(s)
         except Exception:
             return None
-
     cleaned = s.strip()
     cleaned = cleaned.replace("$", "").replace("€", "").replace("£", "")
     cleaned = cleaned.replace(",", "")
     cleaned = re.sub(r"[^0-9\.\-]", "", cleaned)
-
     try:
         return float(cleaned)
     except Exception:
@@ -61,28 +59,50 @@ def _to_int(s: str | None) -> int | None:
 
 
 def _raw_val(x):
-    """Saca {raw, fmt, longFmt} -> raw si viene en dict."""
     if isinstance(x, dict):
         return x.get("raw")
     return x
+
+
+def _cached_get_fallback(cache_key_base: str, paths: list[str], params: dict, ttl: int, err_ttl: int) -> dict:
+    """
+    Prueba múltiples paths (por si el provider usa /api/v1/... vs /v1/...).
+    Cachea por path.
+    """
+    last_err = None
+    for p in paths:
+        try:
+            return rapidapi_cached_get(
+                cache_key=f"{cache_key_base}:{p}",
+                path=p,
+                params=params,
+                ttl_seconds=ttl,
+                error_ttl_seconds=err_ttl,
+            )
+        except RapidAPIError as e:
+            last_err = e
+            # Si es 404, probamos el siguiente path
+            if "HTTP 404" in str(e) or "does not exist" in str(e):
+                continue
+            # Si no es 404, re-lanzamos
+            raise
+    # Si todos fallan, devolvemos el último error
+    raise last_err or RapidAPIError("No se pudo obtener respuesta (fallback sin error).")
 
 
 # -----------------------------
 # QUOTE (real-time-ish)
 # -----------------------------
 def _quote(ticker: str, asset_type: str = "STOCKS") -> dict:
-    """
-    Endpoint comprobado por tu cURL:
-    /api/v1/markets/quote?ticker=AAPL&type=STOCKS
-    """
     t = ticker.strip().upper()
     cache_key = f"yh:quote:{asset_type}:{t}"
 
+    # ESTE ya sabemos que funciona con /api/v1/...
     return rapidapi_cached_get(
         cache_key=cache_key,
         path="/api/v1/markets/quote",
         params={"ticker": t, "type": asset_type},
-        ttl_seconds=10 * 60,     # 10 min
+        ttl_seconds=10 * 60,
         error_ttl_seconds=45,
     )
 
@@ -118,24 +138,16 @@ def get_price_data(ticker: str, asset_type: str = "STOCKS") -> dict:
 # FINANCIAL DATA
 # -----------------------------
 def _financial_data(ticker: str) -> dict:
-    """
-    Endpoint que TU RapidAPI muestra 200 OK:
-    GET /v1/stock/financial-data?ticker=AAPL
-    """
     t = ticker.strip().upper()
-    cache_key = f"yh:financial-data:{t}"
-
-    # Guardarraíl: si alguien cambia a "modules", lo queremos ver de inmediato.
-    path = "/v1/stock/financial-data"
-    if "modules" in path:
-        raise RapidAPIError("BUG: finance_data.py está llamando a /modules, y no debe.")
-
-    return rapidapi_cached_get(
-        cache_key=cache_key,
-        path=path,
+    return _cached_get_fallback(
+        cache_key_base=f"yh:financial-data:{t}",
+        paths=[
+            "/api/v1/stock/financial-data",  # primero probamos este
+            "/v1/stock/financial-data",      # fallback
+        ],
         params={"ticker": t},
-        ttl_seconds=14 * 24 * 3600,  # 14 días
-        error_ttl_seconds=60,
+        ttl=14 * 24 * 3600,
+        err_ttl=60,
     )
 
 
@@ -179,18 +191,16 @@ def get_financial_data(ticker: str) -> dict:
 # PROFILE (asset-profile)
 # -----------------------------
 def _profile(ticker: str) -> dict:
-    """
-    Endpoint: GET /v1/stock/profile?ticker=AAPL
-    """
     t = ticker.strip().upper()
-    cache_key = f"yh:profile:{t}"
-
-    return rapidapi_cached_get(
-        cache_key=cache_key,
-        path="/v1/stock/profile",
+    return _cached_get_fallback(
+        cache_key_base=f"yh:profile:{t}",
+        paths=[
+            "/api/v1/stock/profile",
+            "/v1/stock/profile",
+        ],
         params={"ticker": t},
-        ttl_seconds=30 * 24 * 3600,  # 30 días
-        error_ttl_seconds=60,
+        ttl=30 * 24 * 3600,
+        err_ttl=60,
     )
 
 
@@ -213,7 +223,7 @@ def get_profile_data(ticker: str) -> dict:
 
 
 # -----------------------------
-# STATIC DATA AGGREGATOR
+# STATIC DATA
 # -----------------------------
 def get_static_data(ticker: str) -> dict:
     q = get_price_data(ticker)
