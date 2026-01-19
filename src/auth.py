@@ -35,8 +35,8 @@ def logout() -> None:
     st.rerun()
 
 
-def logout_button(label: str = "Cerrar sesión") -> None:
-    if st.button(label, use_container_width=True):
+def logout_button(label="Cerrar sesión"):
+    if st.button(label, key="logout_button", use_container_width=True):
         logout()
 
 
