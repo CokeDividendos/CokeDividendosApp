@@ -12,7 +12,6 @@ DAILY_LIMIT = 5
 
 
 def _get_user_email() -> str:
-    # Intenta varias keys comunes
     candidates = ["user_email", "email", "username", "user", "auth_email", "logged_email"]
     for k in candidates:
         v = st.session_state.get(k)
@@ -21,7 +20,12 @@ def _get_user_email() -> str:
     return ""
 
 
-def _render_sidebar(user_email: str, rem: int | None):
+def page_analysis():
+    st.title("📊 Análisis Financiero")
+
+    user_email = _get_user_email()
+
+    # --- SIDEBAR (se dibuja UNA sola vez) ---
     with st.sidebar:
         logout_button()
 
@@ -30,12 +34,14 @@ def _render_sidebar(user_email: str, rem: int | None):
             st.success("Caché limpiado.")
             st.rerun()
 
+        # Placeholder para el contador (lo actualizamos sin redibujar widgets)
+        rem_box = st.empty()
+
         if user_email:
-            if rem is None:
-                rem = remaining_searches(user_email, DAILY_LIMIT)
-            st.info(f"🔎 Búsquedas restantes hoy: {rem}/{DAILY_LIMIT}")
+            rem = remaining_searches(user_email, DAILY_LIMIT)
+            rem_box.info(f"🔎 Búsquedas restantes hoy: {rem}/{DAILY_LIMIT}")
         else:
-            st.warning("No pude detectar el email del usuario en sesión.")
+            rem_box.warning("No pude detectar el email del usuario en sesión.")
             with st.expander("Debug: session_state keys"):
                 for k, v in st.session_state.items():
                     if isinstance(v, str):
@@ -43,14 +49,7 @@ def _render_sidebar(user_email: str, rem: int | None):
                     else:
                         st.write(f"- {k}: {type(v).__name__}")
 
-
-def page_analysis():
-    st.title("📊 Análisis Financiero")
-
-    user_email = _get_user_email()
-    rem = remaining_searches(user_email, DAILY_LIMIT) if user_email else None
-    _render_sidebar(user_email, rem)
-
+    # --- FORM: solo consume cuando presiona Buscar ---
     with st.form("search_form", clear_on_submit=False):
         ticker = st.text_input("Ticker", value="AAPL").strip().upper()
         submitted = st.form_submit_button("🔎 Buscar")
@@ -66,13 +65,17 @@ def page_analysis():
     if user_email:
         ok, rem_after = consume_search(user_email, DAILY_LIMIT, cost=1)
         if not ok:
-            # re-render sidebar con rem=0 para reflejar estado
-            _render_sidebar(user_email, 0)
+            # actualiza contador via placeholder
+            with st.sidebar:
+                rem_box.error(f"🔎 Búsquedas restantes hoy: 0/{DAILY_LIMIT}")
             st.error("🚫 Búsquedas diarias alcanzadas. Vuelve mañana.")
             st.stop()
-        # re-render sidebar con contador actualizado (sin duplicar)
-        _render_sidebar(user_email, rem_after)
 
+        # actualiza contador via placeholder (sin duplicar botones)
+        with st.sidebar:
+            rem_box.info(f"🔎 Búsquedas restantes hoy: {rem_after}/{DAILY_LIMIT}")
+
+    # --- DATA ---
     try:
         static = get_static_data(ticker)
         price = get_price_data(ticker)
