@@ -138,17 +138,46 @@ def get_price_data(ticker: str, asset_type: str = "STOCKS") -> dict:
 # FINANCIAL DATA
 # -----------------------------
 def _financial_data(ticker: str) -> dict:
+    """
+    Obtiene datos financieros del ticker.
+
+    Este cliente intenta varias rutas ya que la API de RapidAPI puede exponer
+    diferentes prefijos ("/api/v1" vs "/v1") o agrupar este módulo bajo
+    `/stock/financial-data` o `/stock/modules`. Para maximizar la compatibilidad,
+    probamos secuencialmente y retornamos el primer resultado válido.
+
+    Si todas las rutas fallan con 404 u otro error, se propaga la última
+    excepción.
+    """
     t = ticker.strip().upper()
-    return _cached_get_fallback(
-        cache_key_base=f"yh:financial-data:{t}",
-        paths=[
-            "/api/v1/stock/financial-data",  # primero probamos este
-            "/v1/stock/financial-data",      # fallback
-        ],
-        params={"ticker": t},
-        ttl=14 * 24 * 3600,
-        err_ttl=60,
-    )
+    # Lista de (ruta, params) a probar.
+    candidates = [
+        ("/api/v1/stock/financial-data", {"ticker": t}),
+        ("/v1/stock/financial-data", {"ticker": t}),
+        ("/api/v1/stock/modules", {"ticker": t, "module": "financial-data"}),
+        ("/v1/stock/modules", {"symbol": t, "module": "financial-data"}),
+    ]
+    last_err: RapidAPIError | None = None
+    for path, params in candidates:
+        try:
+            # Incluye la ruta en la clave de caché para que no colisionen
+            cache_key = f"yh:financial-data:{t}:{path}"
+            data = rapidapi_cached_get(
+                cache_key=cache_key,
+                path=path,
+                params=params,
+                ttl_seconds=14 * 24 * 3600,  # 14 días
+                error_ttl_seconds=60,
+            )
+            return data
+        except RapidAPIError as err:
+            last_err = err
+            # Si es 404, probamos el siguiente candidato
+            continue
+    # Si ninguna ruta funcionó, lanzamos el último error registrado
+    if last_err:
+        raise last_err
+    raise RapidAPIError("No se pudo obtener financial-data y no se generó error")
 
 
 def get_financial_data(ticker: str) -> dict:
