@@ -4,6 +4,9 @@ from __future__ import annotations
 import requests
 import streamlit as st
 
+import time
+import random
+
 from src.services.cache_store import cache_get, cache_set
 
 class RapidAPIError(RuntimeError):
@@ -47,18 +50,19 @@ def rapidapi_get(path: str, params: dict | None = None, timeout: int = 25) -> di
     }
 
     r = requests.get(url, headers=headers, params=params or {}, timeout=timeout)
-
-    if r.status_code >= 400:
-        snippet = (r.text or "")[:300]
-        raise RapidAPIError(f"HTTP {r.status_code}. Respuesta (primeros 300 chars): {snippet}")
-
-    try:
-        return r.json()
-    except ValueError:
-        ct = r.headers.get("content-type", "")
-        snippet = (r.text or "")[:300]
-        raise RapidAPIError(f"La respuesta NO es JSON (content-type: {ct}). Primeros 300 chars: {snippet}")
-
+    max_attempts = 4
+    for attempt in range(1, max_attempts + 1):
+        r = requests.get(url, headers=headers, params=params or {}, timeout=timeout)
+    
+        # 429 / 5xx -> retry con backoff
+        if r.status_code in (429, 500, 502, 503, 504):
+            if attempt == max_attempts:
+                break
+            sleep_s = (2 ** (attempt - 1)) + random.uniform(0, 0.5)
+            time.sleep(sleep_s)
+            continue
+    
+        break
 
 def rapidapi_cached_get(
     cache_key: str,
