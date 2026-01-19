@@ -7,13 +7,11 @@ from src.services.logos import logo_candidates
 from src.auth import logout_button
 from src.services.cache_store import cache_clear_all
 
-# Remove this line once deploy is stable
-st.caption("BUILD: 2026-01-19-XYZ")
-
 
 def _get_user_email() -> str:
-    """Extrae el correo del usuario desde session_state."""
-    for k in ("user_email", "email", "username", "user"):
+    # Intenta varias keys comunes
+    candidates = ["user_email", "email", "username", "user", "auth_email", "logged_email"]
+    for k in candidates:
         v = st.session_state.get(k)
         if isinstance(v, str) and "@" in v:
             return v.strip().lower()
@@ -32,15 +30,23 @@ def page_analysis():
 
     with st.sidebar:
         logout_button()
+
         user_email = _get_user_email()
         DAILY_LIMIT = 5
+
         if user_email:
             rem = remaining_searches(user_email, DAILY_LIMIT)
             st.info(f"🔎 Búsquedas restantes hoy: {rem}/{DAILY_LIMIT}")
         else:
-            st.warning("No pude detectar el correo del usuario en sesión.")
+            st.warning("No pude detectar el email del usuario en sesión.")
+            with st.expander("Debug: session_state keys"):
+                # no mostramos valores sensibles completos, solo tipo y (si es string) primeros chars
+                for k, v in st.session_state.items():
+                    if isinstance(v, str):
+                        st.write(f"- {k}: str ({v[:3]}...)")
+                    else:
+                        st.write(f"- {k}: {type(v).__name__}")
 
-    # Formulario evita ejecutar on-change
     with st.form("search_form", clear_on_submit=False):
         ticker = st.text_input("Ticker", value="AAPL").strip().upper()
         submitted = st.form_submit_button("🔎 Buscar")
@@ -52,6 +58,7 @@ def page_analysis():
         st.warning("Ingresa un ticker.")
         st.stop()
 
+    # Consume SOLO al presionar Buscar
     user_email = _get_user_email()
     DAILY_LIMIT = 5
     if user_email:
@@ -71,6 +78,7 @@ def page_analysis():
         logo_urls = logo_candidates(website)
         if logo_urls:
             st.image(logo_urls[0], width=64)
+
         st.subheader(ticker)
 
         last_price = price.get("last_price")
@@ -94,7 +102,7 @@ def page_analysis():
 
         col1, col2, col3 = st.columns(3)
         with col1:
-            st.metric("Empresa", price.get("company_name") or prof.get("name") or "N/D")
+            st.metric("Empresa", prof.get("name") or "N/D")
         with col2:
             st.metric("Exchange", price.get("exchange") or prof.get("exchange") or "N/D")
         with col3:
@@ -108,7 +116,7 @@ def page_analysis():
         if asof:
             st.caption(f"Fecha: {asof}")
 
-        st.info("Base OK. Próximo: conectar estadísticas, estados financieros y dividendos con TTL trimestral.")
+        st.info("Base OK. Próximo: estados financieros históricos + dividendos + ratios.")
 
     except Exception as e:
         st.error(f"Ocurrió un error: {e}")
