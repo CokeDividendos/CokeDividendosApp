@@ -104,7 +104,7 @@ def page_analysis():
 
     with center:
         # NIVEL 1: TÍTULO
-        
+        st.markdown("## 📊 Análisis Financiero")
 
         # NIVEL 2: BUSCADOR
         with st.form("search_form", clear_on_submit=False):
@@ -140,10 +140,24 @@ def page_analysis():
         currency = price.get("currency") or ""
         delta_txt, pct_val = _fmt_delta(price.get("net_change"), price.get("pct_change"))
 
-        # Logo (best effort) - evita el "0"
-        website = (profile.get("website") or raw.get("website") or "") if isinstance(profile, dict) else ""
-        logos = logo_candidates(website) if website else []
-        logo_url = next((u for u in logos if isinstance(u, str) and u.startswith(("http://", "https://"))), "")
+        # -----------------------------
+        # LOGO: PRIORIDAD A yfinance info["logo_url"]
+        # -----------------------------
+        logo_url = ""
+        if isinstance(profile, dict):
+            # ✅ 1) yfinance logo_url (si lo agregaste en finance_data.py)
+            logo_url = profile.get("logo_url") or ""
+            # ✅ 2) fallback: intenta desde raw también
+            if not logo_url and isinstance(raw, dict):
+                logo_url = raw.get("logo_url") or ""
+
+            # ✅ 3) fallback: Clearbit / favicon desde website
+            if not logo_url:
+                website = profile.get("website") or (raw.get("website") if isinstance(raw, dict) else "") or ""
+                if website:
+                    candidates = logo_candidates(website)
+                    if candidates:
+                        logo_url = candidates[0]  # clearbit primero (favicons queda como 2do)
 
         st.write("")  # respiro
 
