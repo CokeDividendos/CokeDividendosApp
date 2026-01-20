@@ -104,7 +104,7 @@ def page_analysis():
 
     with center:
         # NIVEL 1: TÍTULO
-        st.markdown("## 📊 Análisis Financiero")
+        
 
         # NIVEL 2: BUSCADOR
         with st.form("search_form", clear_on_submit=False):
