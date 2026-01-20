@@ -1,17 +1,18 @@
 # src/pages/analysis.py
 import streamlit as st
 
+from src.services.usage_limits import remaining_searches, consume_search
 from src.services.finance_data import (
-    get_dividends_series,
-    get_dividends_by_year,
-    get_dividend_metrics,
     get_static_data,
     get_price_data,
+    get_financial_data,
     get_history_daily,
     get_drawdown_daily,
     get_perf_metrics,
+    get_dividends_series,
+    get_dividends_by_year,
+    get_dividend_metrics,
 )
-from src.services.usage_limits import remaining_searches, consume_search
 from src.services.logos import logo_candidates
 from src.auth import logout_button
 from src.services.cache_store import cache_clear_all
@@ -27,10 +28,6 @@ def _get_user_email() -> str:
 
 
 def _get_user_role() -> str:
-    """
-    Best-effort: intenta detectar rol desde session_state.
-    Ajusta/añade keys si tu auth usa otra.
-    """
     candidates = ["role", "user_role", "auth_role", "logged_role"]
     for k in candidates:
         v = st.session_state.get(k)
@@ -43,27 +40,42 @@ def _is_admin() -> bool:
     role = _get_user_role()
     if role == "admin":
         return True
-
-    # Fallback flags
     if st.session_state.get("is_admin") is True:
         return True
-
     return False
 
 
+def _fmt_float(x, nd="N/D", dec=2):
+    if isinstance(x, (int, float)):
+        try:
+            return f"{float(x):.{dec}f}"
+        except Exception:
+            return nd
+    return nd
+
+
+def _fmt_pct(x, nd="N/D", dec=2):
+    if isinstance(x, (int, float)):
+        try:
+            return f"{float(x) * 100:.{dec}f}%"
+        except Exception:
+            return nd
+    return nd
+
+
 def page_analysis():
-    # ✅ Cambio: límite diario para usuarios = 3
+    # ✅ Ajuste: usuarios 3 búsquedas/día
     DAILY_LIMIT = 3
 
     user_email = _get_user_email()
     is_admin = _is_admin()
 
-    # Header (sin botón de limpiar caché para usuarios)
-    colA, colB = st.columns([0.7, 0.3])
+    # Header
+    colA, colB = st.columns([0.75, 0.25])
     with colA:
         st.title("📊 Análisis Financiero")
     with colB:
-        # ✅ Cambio: limpiar caché SOLO admin
+        # ✅ Ajuste: botón de caché SOLO admin
         if is_admin:
             if st.button("🧹 Limpiar caché", use_container_width=True, key="btn_clear_cache"):
                 cache_clear_all()
@@ -72,7 +84,6 @@ def page_analysis():
 
     # Sidebar
     with st.sidebar:
-        # Nota: en src/auth.py conviene que logout_button use key fija
         logout_button()
 
         if is_admin:
@@ -90,7 +101,7 @@ def page_analysis():
                         else:
                             st.write(f"- {k}: {type(v).__name__}")
 
-    # ✅ Cambio: input centrado y con ancho fijo (no se expande con pantalla)
+    # ✅ Ajuste: input centrado (no full width)
     left, center, right = st.columns([1, 2, 1])
     with center:
         with st.form("search_form", clear_on_submit=False):
@@ -104,7 +115,7 @@ def page_analysis():
         st.warning("Ingresa un ticker.")
         st.stop()
 
-    # Consume SOLO si NO es admin y SOLO al presionar Buscar
+    # Consume SOLO si NO es admin
     if (not is_admin) and user_email:
         ok, rem_after = consume_search(user_email, DAILY_LIMIT, cost=1)
         if not ok:
@@ -116,25 +127,27 @@ def page_analysis():
     try:
         static = get_static_data(ticker)
         price = get_price_data(ticker)
+        fin = get_financial_data(ticker)  # ✅ para beta/per/eps/target
 
         prof = static.get("profile", {}) if isinstance(static, dict) else {}
         website = prof.get("website") or ""
         logo_urls = logo_candidates(website)
 
-        # ✅ Mantener bloque centrado (resultado principal)
-        left2, center2, right2 = st.columns([1, 2, 1])
-        with center2:
+        # ✅ Ajuste: bloque principal centrado y no expansible
+        l2, c2, r2 = st.columns([1, 2, 1])
+        with c2:
             if logo_urls:
                 st.image(logo_urls[0], width=64)
 
-            st.subheader(ticker)
+            # Nombre + ticker (centrado)
+            company_name = prof.get("name") or prof.get("ticker") or ticker
+            st.subheader(f"{company_name} ({ticker})" if company_name != ticker else ticker)
 
+            # Precio + variación
             last_price = price.get("last_price")
             currency = price.get("currency") or ""
             pct = price.get("pct_change")
             net = price.get("net_change")
-            vol = price.get("volume")
-            asof = price.get("asof") or ""
 
             delta_txt = (
                 f"{net:+.2f} ({pct:+.2f}%)"
@@ -144,112 +157,95 @@ def page_analysis():
 
             st.metric(
                 "Precio",
-                f"{last_price:.2f} {currency}".strip()
-                if isinstance(last_price, (int, float))
-                else "N/D",
+                f"{last_price:.2f} {currency}".strip() if isinstance(last_price, (int, float)) else "N/D",
                 delta=delta_txt,
             )
 
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Empresa", prof.get("name") or "N/D")
-            with col2:
-                st.metric("Exchange", price.get("exchange") or prof.get("exchange") or "N/D")
-            with col3:
-                st.metric("Asset Class", price.get("asset_class") or "N/D")
+            # ✅ Ajuste: métricas extra centradas
+            beta = fin.get("beta")
+            pe_ttm = fin.get("pe_ttm")
+            eps_ttm = fin.get("eps_ttm")
+            target_1y = fin.get("target_1y")
 
-            if vol is not None:
-                try:
-                    st.caption(f"Volumen: {int(vol):,}".replace(",", "."))
-                except Exception:
-                    st.caption(f"Volumen: {vol}")
-            if asof:
-                st.caption(f"Fecha: {asof}")
-
-            st.info("Base OK. Próximo: histórico de precio + dividendos + ratios.")
-
-            # -----------------------------
-            # HISTÓRICO + DRAWDOWN + MÉTRICAS
-            # -----------------------------
-            years = 5
-
-            perf = get_perf_metrics(ticker, years=years)
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                st.metric(
-                    "CAGR (aprox)",
-                    f"{perf['cagr']*100:.2f}%"
-                    if isinstance(perf.get("cagr"), (int, float))
-                    else "N/D",
-                )
-            with c2:
-                st.metric(
-                    "Volatilidad anual",
-                    f"{perf['volatility']*100:.2f}%"
-                    if isinstance(perf.get("volatility"), (int, float))
-                    else "N/D",
-                )
-            with c3:
-                st.metric(
-                    "Max Drawdown",
-                    f"{perf['max_drawdown']*100:.2f}%"
-                    if isinstance(perf.get("max_drawdown"), (int, float))
-                    else "N/D",
-                )
-
-            with st.expander("📈 Precio histórico (5Y)", expanded=True):
-                h = get_history_daily(ticker, years=years)
-                if h is None or h.empty:
-                    st.warning("Sin datos históricos.")
+            m1, m2, m3, m4 = st.columns(4)
+            with m1:
+                st.metric("Beta", _fmt_float(beta, dec=2))
+            with m2:
+                st.metric("PER (TTM)", _fmt_float(pe_ttm, dec=2))
+            with m3:
+                st.metric("EPS (TTM)", _fmt_float(eps_ttm, dec=2))
+            with m4:
+                # target suele ser precio, no %
+                if isinstance(target_1y, (int, float)):
+                    st.metric("Target 1Y (est.)", f"{float(target_1y):.2f} {currency}".strip())
                 else:
-                    st.line_chart(h["Close"])
+                    st.metric("Target 1Y (est.)", "N/D")
 
-            with st.expander("📉 Drawdown (5Y)", expanded=False):
-                dd = get_drawdown_daily(ticker, years=years)
-                if dd is None or dd.empty or "Drawdown" not in dd.columns:
-                    st.warning("Sin datos de drawdown.")
-                else:
-                    st.line_chart(dd["Drawdown"])
+        # -----------------------------
+        # Resto (por ahora lo dejamos igual, después lo “qualtrimizamos”)
+        # -----------------------------
+        st.divider()
+        st.info("Base OK. Próximo: layout tipo Qualtrim (gráficos expandibles por métrica).")
 
-            # -----------------------------
-            # DIVIDENDOS (5Y)
-            # -----------------------------
-            with st.expander("💸 Dividendos (5Y)", expanded=False):
-                dm = get_dividend_metrics(ticker, years=5)
+        years = 5
+        perf = get_perf_metrics(ticker, years=years)
 
-                d1, d2, d3 = st.columns(3)
-                with d1:
-                    st.metric(
-                        "Dividendo TTM",
-                        f"{dm['ttm_dividend']:.2f}"
-                        if isinstance(dm.get("ttm_dividend"), (int, float))
-                        else "N/D",
-                    )
-                with d2:
-                    st.metric(
-                        "Yield TTM",
-                        f"{dm['ttm_yield']*100:.2f}%"
-                        if isinstance(dm.get("ttm_yield"), (int, float))
-                        else "N/D",
-                    )
-                with d3:
-                    st.metric(
-                        "CAGR Div (aprox)",
-                        f"{dm['div_cagr']*100:.2f}%"
-                        if isinstance(dm.get("div_cagr"), (int, float))
-                        else "N/D",
-                    )
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.metric(
+                "CAGR (aprox)",
+                f"{perf['cagr']*100:.2f}%" if isinstance(perf.get("cagr"), (int, float)) else "N/D",
+            )
+        with c2:
+            st.metric(
+                "Volatilidad anual",
+                f"{perf['volatility']*100:.2f}%" if isinstance(perf.get("volatility"), (int, float)) else "N/D",
+            )
+        with c3:
+            st.metric(
+                "Max Drawdown",
+                f"{perf['max_drawdown']*100:.2f}%" if isinstance(perf.get("max_drawdown"), (int, float)) else "N/D",
+            )
 
-                divs = get_dividends_series(ticker, years=5)
-                if divs is None or divs.empty:
-                    st.warning("Sin dividendos disponibles para este ticker.")
-                else:
-                    st.line_chart(divs["Dividend"])
+        with st.expander("📈 Precio histórico (5Y)", expanded=False):
+            h = get_history_daily(ticker, years=years)
+            if h is None or h.empty:
+                st.warning("Sin datos históricos.")
+            else:
+                st.line_chart(h["Close"])
 
-                annual = get_dividends_by_year(ticker, years=5)
-                if annual is not None and not annual.empty:
-                    st.bar_chart(annual.set_index("Year")["Dividends"])
+        with st.expander("📉 Drawdown (5Y)", expanded=False):
+            dd = get_drawdown_daily(ticker, years=years)
+            if dd is None or dd.empty or "Drawdown" not in dd.columns:
+                st.warning("Sin datos de drawdown.")
+            else:
+                st.line_chart(dd["Drawdown"])
+
+        with st.expander("💸 Dividendos (5Y)", expanded=False):
+            dm = get_dividend_metrics(ticker, years=5)
+
+            d1, d2, d3 = st.columns(3)
+            with d1:
+                st.metric(
+                    "Dividendo TTM",
+                    _fmt_float(dm.get("ttm_dividend"), dec=2),
+                )
+            with d2:
+                y = dm.get("ttm_yield")
+                st.metric("Yield TTM", f"{y*100:.2f}%" if isinstance(y, (int, float)) else "N/D")
+            with d3:
+                c = dm.get("div_cagr")
+                st.metric("CAGR Div (aprox)", f"{c*100:.2f}%" if isinstance(c, (int, float)) else "N/D")
+
+            divs = get_dividends_series(ticker, years=5)
+            if divs is None or divs.empty:
+                st.warning("Sin dividendos disponibles para este ticker.")
+            else:
+                st.line_chart(divs["Dividend"])
+
+            annual = get_dividends_by_year(ticker, years=5)
+            if annual is not None and not annual.empty:
+                st.bar_chart(annual.set_index("Year")["Dividends"])
 
     except Exception as e:
         st.error(f"Ocurrió un error: {e}")
-
