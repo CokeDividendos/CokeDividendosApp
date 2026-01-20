@@ -152,8 +152,7 @@ def page_analysis():
 
         with c1:
             if logo_url:
-                if logo and logo[0].startswith("http"):
-                    st.image(logo[0], width=56)
+            st.image(logo[0], width=56)
 
         with c2:
             # Nombre grande
