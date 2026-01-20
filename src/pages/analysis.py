@@ -156,9 +156,11 @@ def page_analysis():
 
         with c2:
             # Nombre grande
+            st.caption("Nombre")
             st.markdown(f"### {company_name}")
 
             # Precio grande (mismo tamaño)
+            st.caption("Precio")
             st.markdown(f"### {_fmt_price(last_price, currency)}")
 
             # Variación debajo, con color
