@@ -36,10 +36,13 @@ def _fmt_price(x, currency: str) -> str:
     return f"{s} {currency}".strip()
 
 
-def _fmt_delta(net, pct) -> str | None:
+def _fmt_delta(net, pct) -> tuple[str | None, float | None]:
+    """
+    Retorna (texto_delta, pct_float) para colorear.
+    """
     if isinstance(net, (int, float)) and isinstance(pct, (int, float)):
-        return f"{net:+.2f} ({pct:+.2f}%)"
-    return None
+        return f"{net:+.2f} ({pct:+.2f}%)", float(pct)
+    return None, None
 
 
 def _fmt_kpi(x, suffix: str = "", decimals: int = 2) -> str:
@@ -74,25 +77,19 @@ def page_analysis():
                 limit_box.warning("No se detectó el correo del usuario.")
 
     # -----------------------------
-    # CSS: fijar ancho REAL del contenido (sin barras grises)
+    # CSS: fijar ancho REAL del contenido
     # -----------------------------
     st.markdown(
         """
         <style>
-          /* Fijar ancho del contenido principal en Streamlit (robusto + !important) */
           div[data-testid="stAppViewContainer"] section.main div.block-container {
             max-width: 980px !important;
             margin: 0 auto !important;
             padding-left: 18px !important;
             padding-right: 18px !important;
           }
+          div[data-testid="stVerticalBlock"] { max-width: 980px !important; }
 
-          /* Evitar que algunas filas/containers vuelvan a estirarse */
-          div[data-testid="stVerticalBlock"] {
-            max-width: 980px !important;
-          }
-
-          /* Ajustes sutiles de spacing para “look moderno” (sin bordes) */
           h2, h3 { margin-bottom: 0.25rem !important; }
           [data-testid="stCaptionContainer"] { margin-top: -6px !important; }
         </style>
@@ -101,7 +98,7 @@ def page_analysis():
     )
 
     # -----------------------------
-    # CONTENIDO CENTRADO EN COLUMNA MEDIA (grilla sin bordes)
+    # CONTENIDO CENTRADO
     # -----------------------------
     pad_l, center, pad_r = st.columns([1, 3, 1], gap="large")
 
@@ -109,7 +106,7 @@ def page_analysis():
         # NIVEL 1: TÍTULO
         st.markdown("## 📊 Análisis Financiero")
 
-        # NIVEL 2: BUSCADOR (no se expandirá más allá del max-width)
+        # NIVEL 2: BUSCADOR
         with st.form("search_form", clear_on_submit=False):
             ticker = st.text_input("Ticker", value="AAPL").strip().upper()
             submitted = st.form_submit_button("🔎 Buscar")
@@ -141,34 +138,40 @@ def page_analysis():
 
         last_price = price.get("last_price")
         currency = price.get("currency") or ""
-        delta_txt = _fmt_delta(price.get("net_change"), price.get("pct_change"))
+        delta_txt, pct_val = _fmt_delta(price.get("net_change"), price.get("pct_change"))
 
-        # Logo (evitar el “0”: solo URL válida)
+        # Logo (best effort) - evita el "0"
         website = (profile.get("website") or raw.get("website") or "") if isinstance(profile, dict) else ""
         logos = logo_candidates(website) if website else []
         logo_url = next((u for u in logos if isinstance(u, str) and u.startswith(("http://", "https://"))), "")
 
-        st.write("")  # pequeño respiro visual
+        st.write("")  # respiro
 
-        # NIVEL 3: LOGO + NOMBRE (izq) y PRECIO + VARIACIÓN (der) en la misma línea
-        c1, c2, c3 = st.columns([0.12, 0.58, 0.30], gap="small", vertical_alignment="center")
+        # NIVEL 3: LOGO (izq) + BLOQUE NOMBRE/PRECIO/VARIACIÓN (vertical)
+        c1, c2 = st.columns([0.12, 0.88], gap="small", vertical_alignment="center")
 
         with c1:
             if logo_url:
                 st.image(logo_url, width=46)
 
         with c2:
+            # Nombre grande
             st.markdown(f"### {company_name}")
-            st.caption(ticker)
 
-        with c3:
+            # Precio grande (mismo tamaño)
             st.markdown(f"### {_fmt_price(last_price, currency)}")
+
+            # Variación debajo, con color
             if delta_txt:
-                st.caption(delta_txt)
+                color = "#16a34a" if (pct_val is not None and pct_val >= 0) else "#dc2626"
+                st.markdown(
+                    f"<div style='margin-top:-6px; font-size:0.92rem; color:{color};'>{delta_txt}</div>",
+                    unsafe_allow_html=True,
+                )
 
         st.divider()
 
-        # NIVEL 4: KPIs (grilla 4 columnas, sin bordes)
+        # NIVEL 4: KPIs (grilla 4 col, sin bordes)
         k1, k2, k3, k4 = st.columns(4, gap="large")
 
         with k1:
