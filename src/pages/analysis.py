@@ -158,10 +158,12 @@ def page_analysis():
                 st.image(logo_url, width=46)
 
         with c2:
+            st.caption("Nombre")
             st.markdown(f"### {company_name}")
             st.caption(ticker)
 
         with c3:
+            st.caption("Precio")
             st.markdown(f"### {_fmt_price(last_price, currency)}")
             if delta_txt:
                 st.caption(delta_txt)
