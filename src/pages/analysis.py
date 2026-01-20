@@ -6,12 +6,6 @@ from src.services.finance_data import (
     get_static_data,
     get_price_data,
     get_profile_data,
-    get_history_daily,
-    get_drawdown_daily,
-    get_perf_metrics,
-    get_dividends_series,
-    get_dividends_by_year,
-    get_dividend_metrics,
     get_key_stats,
 )
 from src.services.logos import logo_candidates
@@ -38,22 +32,61 @@ def _get_user_role() -> str:
 
 
 def _is_admin() -> bool:
-    role = _get_user_role()
-    if role == "admin":
+    if _get_user_role() == "admin":
         return True
-    if st.session_state.get("is_admin") is True:
-        return True
-    return False
+    return st.session_state.get("is_admin") is True
 
 
 def _fmt_num(x, nd="N/D", fmt="{:.2f}"):
     return fmt.format(x) if isinstance(x, (int, float)) else nd
 
 
+def _first_valid_logo_url(urls) -> str:
+    if not urls:
+        return ""
+    for u in urls:
+        if isinstance(u, str):
+            us = u.strip()
+            if us.startswith("http://") or us.startswith("https://"):
+                return us
+    return ""
+
+
 def page_analysis():
+    # -----------------------------
+    # CONFIG
+    # -----------------------------
     DAILY_LIMIT = 3
     user_email = _get_user_email()
     is_admin = _is_admin()
+
+    # -----------------------------
+    # CSS: contenedor centrado + cards con ancho fijo
+    # -----------------------------
+    st.markdown(
+        """
+        <style>
+          /* Ancho fijo para los bloques principales */
+          .cd-wrap { max-width: 760px; margin: 0 auto; }
+          .cd-card {
+            border: 1px solid rgba(49,51,63,.15);
+            border-radius: 14px;
+            padding: 18px 18px;
+            margin: 14px auto;
+            background: rgba(255,255,255,.75);
+          }
+          /* Ajustes dark-mode amigables */
+          @media (prefers-color-scheme: dark) {
+            .cd-card { background: rgba(28,28,28,.55); border-color: rgba(255,255,255,.12); }
+          }
+          /* Precio alineado a la derecha */
+          .cd-right { text-align: right; }
+          .cd-muted { opacity: .75; font-size: .9rem; }
+          .cd-delta { font-size: .9rem; opacity: .85; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
     # -----------------------------
     # SIDEBAR (una sola vez)
@@ -85,87 +118,112 @@ def page_analysis():
                 st.rerun()
 
     # -----------------------------
-    # LAYOUT CENTRADO (Opción A)
+    # CONTENIDO CENTRADO (wrap)
     # -----------------------------
-    pad_l, center, pad_r = st.columns([1, 2, 1])
+    st.markdown('<div class="cd-wrap">', unsafe_allow_html=True)
 
-    with center:
-        # FORM centrado (no se expande a todo el ancho de la pantalla)
-        with st.form("search_form", clear_on_submit=False):
-            ticker = st.text_input("Ticker", value="AAPL").strip().upper()
-            submitted = st.form_submit_button("🔎 Buscar")
+    # --------- CARD: BUSCADOR (centrado y NO expansivo) ----------
+    st.markdown('<div class="cd-card">', unsafe_allow_html=True)
+    with st.form("search_form", clear_on_submit=False):
+        ticker = st.text_input("Ticker", value="AAPL").strip().upper()
+        submitted = st.form_submit_button("🔎 Buscar")
+    st.markdown("</div>", unsafe_allow_html=True)
 
-        if not submitted:
+    if not submitted:
+        st.markdown("</div>", unsafe_allow_html=True)  # close wrap
+        return
+
+    if not ticker:
+        st.warning("Ingresa un ticker.")
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
+
+    # Consume SOLO si NO es admin
+    if (not is_admin) and user_email:
+        ok, rem_after = consume_search(user_email, DAILY_LIMIT, cost=1)
+        if not ok:
+            limit_box.error("🚫 Búsquedas diarias alcanzadas. Vuelve mañana.")
+            st.markdown("</div>", unsafe_allow_html=True)
             return
+        limit_box.info(f"🔎 Búsquedas restantes hoy: {rem_after}/{DAILY_LIMIT}")
 
-        if not ticker:
-            st.warning("Ingresa un ticker.")
-            return
+    # -----------------------------
+    # DATA
+    # -----------------------------
+    static = get_static_data(ticker)
+    price = get_price_data(ticker)
+    prof_full = get_profile_data(ticker)
+    prof_raw = prof_full.get("raw") if isinstance(prof_full, dict) else {}
 
-        # Consume SOLO si NO es admin
-        if (not is_admin) and user_email:
-            ok, rem_after = consume_search(user_email, DAILY_LIMIT, cost=1)
-            if not ok:
-                limit_box.error("🚫 Búsquedas diarias alcanzadas. Vuelve mañana.")
-                return
-            limit_box.info(f"🔎 Búsquedas restantes hoy: {rem_after}/{DAILY_LIMIT}")
+    profile = static.get("profile", {}) if isinstance(static, dict) else {}
+    company_name = (
+        (profile.get("name") if isinstance(profile, dict) else None)
+        or (prof_raw.get("longName") if isinstance(prof_raw, dict) else None)
+        or (prof_raw.get("shortName") if isinstance(prof_raw, dict) else None)
+        or (prof_full.get("shortName") if isinstance(prof_full, dict) else None)
+        or "N/D"
+    )
 
-        # -----------------------------
-        # DATA
-        # -----------------------------
-        static = get_static_data(ticker)
-        price = get_price_data(ticker)
-        prof_full = get_profile_data(ticker)  # para nombre robusto
-        prof_raw = prof_full.get("raw") if isinstance(prof_full, dict) else {}
+    last_price = price.get("last_price")
+    currency = price.get("currency") or ""
+    pct = price.get("pct_change")
+    net = price.get("net_change")
 
-        # Logo (best effort)
-        website = (prof_full.get("website") if isinstance(prof_full, dict) else None) or prof_raw.get("website") or ""
-        logo = logo_candidates(website)
-        if logo:
-            st.image(logo[0], width=56)
+    delta_txt = (
+        f"{net:+.2f} ({pct:+.2f}%)"
+        if isinstance(net, (int, float)) and isinstance(pct, (int, float))
+        else ""
+    )
 
-        # Nombre con prioridad: static["profile"]["name"]
-        profile = static.get("profile", {}) if isinstance(static, dict) else {}
-        company_name = (
-            (profile.get("name") if isinstance(profile, dict) else None)
-            or (prof_raw.get("longName") if isinstance(prof_raw, dict) else None)
-            or (prof_raw.get("shortName") if isinstance(prof_raw, dict) else None)
-            or (prof_full.get("shortName") if isinstance(prof_full, dict) else None)
-            or "N/D"
-        )
+    # Logo best-effort (evita “0” / valores no url)
+    website = (prof_full.get("website") if isinstance(prof_full, dict) else None) or (prof_raw.get("website") if isinstance(prof_raw, dict) else "") or ""
+    logo_url = _first_valid_logo_url(logo_candidates(website))
 
-        last_price = price.get("last_price")
-        currency = price.get("currency") or ""
-        pct = price.get("pct_change")
-        net = price.get("net_change")
+    # KPIs (si tu finance_data.py ya tiene get_key_stats, perfecto; si no, quedará N/D)
+    try:
+        ks = get_key_stats(ticker) or {}
+    except Exception:
+        ks = {}
 
-        delta_txt = (
-            f"{net:+.2f} ({pct:+.2f}%)"
-            if isinstance(net, (int, float)) and isinstance(pct, (int, float))
-            else None
-        )
+    beta = ks.get("beta")
+    pe_ttm = ks.get("pe_ttm")
+    eps_ttm = ks.get("eps_ttm")
+    target_1y = ks.get("target_1y")
 
-        # -----------------------------
-        # NOMBRE + PRECIO EN LA MISMA LÍNEA
-        # -----------------------------
-        row_l, row_r = st.columns([0.62, 0.38], vertical_alignment="bottom")
+    # --------- CARD: HEADER (logo + nombre + precio en misma línea) ----------
+    st.markdown('<div class="cd-card">', unsafe_allow_html=True)
 
-        with row_l:
-            # Nombre grande, ticker pequeño debajo
-            st.markdown(f"## {company_name}")
-            st.caption(ticker)
+    c_logo, c_name, c_price = st.columns([0.14, 0.56, 0.30], vertical_alignment="center")
 
-        with row_r:
-            # Precio + delta (en el mismo renglón visual de la sección superior)
-            if isinstance(last_price, (int, float)):
-                st.markdown(f"## {_fmt_num(last_price)} {currency}".strip())
-            else:
-                st.markdown("## N/D")
+    with c_logo:
+        if logo_url:
+            st.image(logo_url, width=44)
 
-            if delta_txt:
-                # estilo simple (sin meter st.metric que tiende a “romper” la alineación)
-                st.caption(delta_txt)
+    with c_name:
+        st.markdown(f"### {company_name}")
+        st.markdown(f'<div class="cd-muted">{ticker}</div>', unsafe_allow_html=True)
 
-        st.divider()
+    with c_price:
+        if isinstance(last_price, (int, float)):
+            st.markdown(f'<div class="cd-right"><h3 style="margin:0">{_fmt_num(last_price)} {currency}</h3></div>', unsafe_allow_html=True)
+        else:
+            st.markdown('<div class="cd-right"><h3 style="margin:0">N/D</h3></div>', unsafe_allow_html=True)
 
-        # Nada más por ahora, como pediste (sin tocar KPIs/expander/etc)
+        if delta_txt:
+            st.markdown(f'<div class="cd-right cd-delta">{delta_txt}</div>', unsafe_allow_html=True)
+
+    st.divider()
+
+    # --------- KPIs centrados y contenidos dentro de la misma card ----------
+    k1, k2, k3, k4 = st.columns(4)
+    with k1:
+        st.metric("Beta", _fmt_num(beta, fmt="{:.2f}"))
+    with k2:
+        st.metric("PER (TTM)", _fmt_num(pe_ttm, fmt="{:.2f}x"))
+    with k3:
+        st.metric("EPS (TTM)", _fmt_num(eps_ttm, fmt="{:.2f}"))
+    with k4:
+        st.metric("Target 1Y (est.)", _fmt_num(target_1y, fmt="{:.2f}"))
+
+    st.markdown("</div>", unsafe_allow_html=True)  # close header card
+    st.markdown("</div>", unsafe_allow_html=True)  # close wrap
