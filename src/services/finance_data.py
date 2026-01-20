@@ -474,6 +474,175 @@ def get_dividend_metrics(ticker: str, years: int = 5) -> dict:
 
     return _cache_get_or_set(key, ttl, _load)
 
+# -----------------------------
+# FINANCIAL STATEMENTS (TTL 90 días)
+# -----------------------------
+def _limit_years(df: pd.DataFrame, years: int = 5) -> pd.DataFrame:
+    """Recorta columnas a los últimos N años (si son datetimes) y deja orden cronológico."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+    out = df.copy()
+    # yfinance suele traer columnas como Timestamps (fechas de cierre)
+    try:
+        cols = list(out.columns)
+        # Si columnas son fechas, ordena y corta
+        cols_sorted = sorted(cols)
+        cols_sorted = cols_sorted[-years:]
+        out = out[cols_sorted]
+    except Exception:
+        pass
+    return out
+
+
+def _df_to_records(df: pd.DataFrame) -> list[dict]:
+    """Convierte DataFrame (índice=cuentas, columnas=fechas) a records por año."""
+    if df is None or df.empty:
+        return []
+    df = df.copy()
+
+    # normaliza nombres
+    df.index = df.index.astype(str)
+
+    # columnas a string-año
+    col_years = []
+    for c in df.columns:
+        try:
+            ts = pd.to_datetime(c, utc=True, errors="coerce")
+            if pd.isna(ts):
+                col_years.append(str(c))
+            else:
+                col_years.append(str(ts.tz_convert(None).year))
+        except Exception:
+            col_years.append(str(c))
+    df.columns = col_years
+
+    # nos quedamos con últimos 5 “años” si se puede ordenar numéricamente
+    try:
+        yrs = sorted([int(x) for x in df.columns if str(x).isdigit()])
+        keep = yrs[-5:]
+        df = df[[str(y) for y in keep]]
+    except Exception:
+        pass
+
+    # records: [{account, 2021:..., 2022:...}]
+    df = df.reset_index().rename(columns={"index": "account"})
+    return df.to_dict(orient="records")
+
+
+def get_income_statement(ticker: str, years: int = 5) -> pd.DataFrame:
+    t = ticker.strip().upper()
+    key = f"yf:stmt:is:{t}:{years}y"
+    ttl = 60 * 60 * 24 * 90
+
+    def _load():
+        import yfinance as yf
+        tk = yf.Ticker(t)
+        df = yf_call(lambda: tk.financials)  # anual
+        if df is None or df.empty:
+            return []
+        df = _limit_years(df, years=years)
+        return _df_to_records(df)
+
+    records = _cache_get_or_set(key, ttl, _load)
+    return _df_from_cached_records(records)
+
+
+def get_balance_sheet(ticker: str, years: int = 5) -> pd.DataFrame:
+    t = ticker.strip().upper()
+    key = f"yf:stmt:bs:{t}:{years}y"
+    ttl = 60 * 60 * 24 * 90
+
+    def _load():
+        import yfinance as yf
+        tk = yf.Ticker(t)
+        df = yf_call(lambda: tk.balance_sheet)  # anual
+        if df is None or df.empty:
+            return []
+        df = _limit_years(df, years=years)
+        return _df_to_records(df)
+
+    records = _cache_get_or_set(key, ttl, _load)
+    return _df_from_cached_records(records)
+
+
+def get_cashflow_statement(ticker: str, years: int = 5) -> pd.DataFrame:
+    t = ticker.strip().upper()
+    key = f"yf:stmt:cf:{t}:{years}y"
+    ttl = 60 * 60 * 24 * 90
+
+    def _load():
+        import yfinance as yf
+        tk = yf.Ticker(t)
+        df = yf_call(lambda: tk.cashflow)  # anual
+        if df is None or df.empty:
+            return []
+        df = _limit_years(df, years=years)
+        return _df_to_records(df)
+
+    records = _cache_get_or_set(key, ttl, _load)
+    return _df_from_cached_records(records)
+
+
+# -----------------------------
+# CORE RATIOS (derivados, TTL 90 días)
+# -----------------------------
+def get_core_ratios(ticker: str, years: int = 5) -> dict:
+    """
+    Ratios básicos usando info + estados (cuando existan).
+    No buscamos exactitud contable perfecta aún: es para panel inicial.
+    """
+    t = ticker.strip().upper()
+    key = f"yf:ratios:core:{t}:{years}y"
+    ttl = 60 * 60 * 24 * 90
+
+    def _load():
+        fin = get_financial_data(t)  # info snapshot
+        price = get_price_data(t)
+
+        # fallbacks típicos
+        market_cap = None
+        try:
+            # viene en info a veces
+            import yfinance as yf
+            tk = yf.Ticker(t)
+            info = yf_call(lambda: tk.info or {})
+            info = _json_safe(info)
+            market_cap = info.get("marketCap")
+        except Exception:
+            pass
+
+        fcf = fin.get("free_cashflow")
+        revenue = fin.get("total_revenue")
+        debt = fin.get("total_debt")
+        cash = fin.get("total_cash")
+
+        fcf_margin = None
+        if isinstance(fcf, (int, float)) and isinstance(revenue, (int, float)) and revenue:
+            fcf_margin = fcf / revenue
+
+        net_debt = None
+        if isinstance(debt, (int, float)) and isinstance(cash, (int, float)):
+            net_debt = debt - cash
+
+        fcf_yield = None
+        if isinstance(fcf, (int, float)) and isinstance(market_cap, (int, float)) and market_cap:
+            fcf_yield = fcf / market_cap
+
+        return {
+            "roe": fin.get("roe"),
+            "roa": fin.get("roa"),
+            "debt_to_equity": fin.get("debt_to_equity"),
+            "current_ratio": fin.get("current_ratio"),
+            "quick_ratio": fin.get("quick_ratio"),
+            "net_debt": net_debt,
+            "fcf_margin": fcf_margin,
+            "fcf_yield": fcf_yield,
+            "market_cap": market_cap,
+            "currency": fin.get("financial_currency") or price.get("currency"),
+        }
+
+    return _cache_get_or_set(key, ttl, _load)
+
 
 # -----------------------------
 # AGGREGATOR (mantiene compatibilidad con UI)
