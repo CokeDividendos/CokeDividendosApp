@@ -9,32 +9,28 @@ from src.services.cache_store import cache_clear_all
 
 
 def _get_user_email() -> str:
-    keys = ["user_email", "email", "username", "user", "auth_email", "logged_email", "auth_email"]
-    for k in keys:
-        v = st.session_state.get(k)
+    for key in ["user_email", "email", "username", "user", "auth_email", "logged_email"]:
+        v = st.session_state.get(key)
         if isinstance(v, str) and "@" in v:
             return v.strip().lower()
     return ""
 
 
 def _get_user_role() -> str:
-    keys = ["role", "user_role", "auth_role", "logged_role", "auth_role"]
-    for k in keys:
-        v = st.session_state.get(k)
+    for key in ["role", "user_role", "auth_role", "logged_role"]:
+        v = st.session_state.get(key)
         if isinstance(v, str) and v:
             return v.strip().lower()
     return ""
 
 
 def _is_admin() -> bool:
+    # User is admin if role=admin or a separate flag is set
     return _get_user_role() == "admin" or st.session_state.get("is_admin") is True
 
 
 def _fmt_price(x, currency: str) -> str:
-    if isinstance(x, (int, float)):
-        # formato tipo 250.48 USD (puedes cambiar a formato CL si quieres)
-        return f"{x:.2f} {currency}".strip()
-    return "N/D"
+    return f"{x:,.2f} {currency}".replace(",", "X").replace(".", ",").replace("X", ".") if isinstance(x, (int, float)) else "N/D"
 
 
 def _fmt_delta(net, pct) -> str | None:
@@ -43,10 +39,8 @@ def _fmt_delta(net, pct) -> str | None:
     return None
 
 
-def _fmt_kpi(x, suffix: str = "") -> str:
-    if isinstance(x, (int, float)):
-        return f"{x:.2f}{suffix}"
-    return "N/D"
+def _fmt_kpi(x, suffix: str = "", decimals: int = 2) -> str:
+    return f"{x:.{decimals}f}{suffix}" if isinstance(x, (int, float)) else "N/D"
 
 
 def page_analysis():
@@ -54,149 +48,125 @@ def page_analysis():
     user_email = _get_user_email()
     is_admin = _is_admin()
 
-    # -----------------------------
-    # CSS: Contenedor centrado para TODO el contenido principal
-    # -----------------------------
+    # Sidebar: logout and cache clear button (only admin)
+    with st.sidebar:
+        logout_button()  # logout_button has key="logout_button"
+        if is_admin:
+            # Clear cache only for admin
+            if st.button("🧹 Limpiar caché", use_container_width=True):
+                cache_clear_all()
+                st.success("Caché limpiado.")
+                st.rerun()
+        # Show remaining searches or admin message
+        if is_admin:
+            st.success("👑 Admin: sin límite diario (las búsquedas igual alimentan el caché global).")
+        else:
+            if user_email:
+                rem = remaining_searches(user_email, DAILY_LIMIT)
+                st.info(f"🔎 Búsquedas restantes hoy: {rem}/{DAILY_LIMIT}")
+            else:
+                st.warning("No se detectó el correo del usuario.")
+
+    # CSS: wrap main content in a fixed-width container
     st.markdown(
         """
         <style>
-          .cd-wrap {
-            max-width: 820px;
-            margin: 0 auto;
+          /* Main container fixed width and centered */
+          .analysis-wrapper {
+            max-width: 800px;
+            margin-left: auto;
+            margin-right: auto;
+            padding-left: 12px;
+            padding-right: 12px;
           }
-          /* reduce el "aire" arriba */
-          .cd-title { margin-top: 0.25rem; margin-bottom: 0.75rem; }
-
-          /* el form dentro del contenedor */
-          .cd-form > div[data-testid="stForm"] {
-            border: 1px solid rgba(49, 51, 63, 0.12);
-            border-radius: 14px;
-            padding: 14px 14px 6px 14px;
-            background: rgba(255,255,255,0.0);
+          /* Card-like section for form and KPIs */
+          .analysis-card {
+            padding: 16px 18px;
+            border-radius: 12px;
+            background: rgba(255, 255, 255, 0.8);
+            margin-top: 16px;
           }
-
-          /* “cards” sin borde (look moderno), pero con separación */
-          .cd-card {
-            padding: 12px 2px;
-            margin-top: 12px;
+          @media (prefers-color-scheme: dark) {
+            .analysis-card {
+              background: rgba(30, 30, 30, 0.7);
+            }
           }
-
-          /* evita que imágenes dejen basura visual */
-          .cd-logo img { display: block; }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
-    # -----------------------------
-    # SIDEBAR (1 sola vez)
-    # -----------------------------
-    with st.sidebar:
-        logout_button()  # ya tiene key fijo en auth.py ✅
-        limit_box = st.empty()
+    # Main wrapper div start
+    st.markdown('<div class="analysis-wrapper">', unsafe_allow_html=True)
 
-        # Botón de caché SOLO admin y acá (no arriba en el header)
-        if is_admin:
-            if st.button("🧹 Limpiar caché", key="clear_cache_btn", use_container_width=True):
-                cache_clear_all()
-                st.success("Caché limpiado.")
-                st.rerun()
-
-        if is_admin:
-            limit_box.success("👑 Admin: sin límite diario (alimenta el caché global).")
-        else:
-            if user_email:
-                rem = remaining_searches(user_email, DAILY_LIMIT)
-                limit_box.info(f"🔎 Búsquedas restantes hoy: {rem}/{DAILY_LIMIT}")
-            else:
-                limit_box.warning("No se detectó email del usuario.")
-
-    # -----------------------------
-    # CONTENIDO PRINCIPAL CENTRADO
-    # -----------------------------
-    st.markdown('<div class="cd-wrap">', unsafe_allow_html=True)
-
-    # Título centrado y SIN expandirse (queda dentro del contenedor)
-    st.markdown('<div class="cd-title">', unsafe_allow_html=True)
+    # Title
     st.markdown("## 📊 Análisis Financiero")
-    st.markdown("</div>", unsafe_allow_html=True)
 
-    # -----------------------------
-    # FORM centrado (en “rectángulo”)
-    # -----------------------------
-    st.markdown('<div class="cd-form">', unsafe_allow_html=True)
+    # Search form in a card (prevents expansion)
+    st.markdown('<div class="analysis-card">', unsafe_allow_html=True)
     with st.form("search_form", clear_on_submit=False):
         ticker = st.text_input("Ticker", value="AAPL").strip().upper()
         submitted = st.form_submit_button("🔎 Buscar")
     st.markdown("</div>", unsafe_allow_html=True)
 
+    # If form not submitted yet, stop here
     if not submitted:
-        st.markdown("</div>", unsafe_allow_html=True)  # cd-wrap
+        st.markdown("</div>", unsafe_allow_html=True)
         return
 
     if not ticker:
         st.warning("Ingresa un ticker.")
-        st.markdown("</div>", unsafe_allow_html=True)  # cd-wrap
+        st.markdown("</div>", unsafe_allow_html=True)
         return
 
-    # Consume SOLO si NO es admin
-    if (not is_admin) and user_email:
+    # Limit searches for non-admins
+    if not is_admin and user_email:
         ok, rem_after = consume_search(user_email, DAILY_LIMIT, cost=1)
         if not ok:
-            limit_box.error("🚫 Búsquedas diarias alcanzadas. Vuelve mañana.")
-            st.markdown("</div>", unsafe_allow_html=True)  # cd-wrap
+            st.error("🚫 Búsquedas diarias alcanzadas. Vuelve mañana.")
+            st.markdown("</div>", unsafe_allow_html=True)
             return
-        limit_box.info(f"🔎 Búsquedas restantes hoy: {rem_after}/{DAILY_LIMIT}")
+        # Update remaining search count in sidebar
+        st.sidebar.info(f"🔎 Búsquedas restantes hoy: {rem_after}/{DAILY_LIMIT}")
 
-    # -----------------------------
-    # DATA
-    # -----------------------------
+    # Fetch data
     price = get_price_data(ticker) or {}
-    prof_full = get_profile_data(ticker) or {}
-    prof_raw = prof_full.get("raw") if isinstance(prof_full, dict) else {}
+    profile = get_profile_data(ticker) or {}
+    raw = profile.get("raw") if isinstance(profile, dict) else {}
     stats = get_key_stats(ticker) or {}
 
+    # Determine company name
     company_name = (
-        (prof_raw.get("longName") if isinstance(prof_raw, dict) else None)
-        or (prof_raw.get("shortName") if isinstance(prof_raw, dict) else None)
-        or (prof_full.get("shortName") if isinstance(prof_full, dict) else None)
+        raw.get("longName")
+        or raw.get("shortName")
+        or profile.get("shortName")
         or ticker
     )
 
+    # Price and variation
     last_price = price.get("last_price")
     currency = price.get("currency") or ""
     delta_txt = _fmt_delta(price.get("net_change"), price.get("pct_change"))
 
-    # Logo (best effort) — filtra URLs válidas para evitar que aparezca “0”
-    website = ""
-    if isinstance(prof_full, dict):
-        website = prof_full.get("website") or ""
-    if not website and isinstance(prof_raw, dict):
-        website = prof_raw.get("website") or ""
-
-    logo_urls = [
-        u for u in (logo_candidates(website) or [])
-        if isinstance(u, str) and u.startswith(("http://", "https://"))
-    ]
+    # Get logo (best effort)
+    website = (profile.get("website") or raw.get("website") or "")
+    logos = logo_candidates(website) if website else []
+    logo_url = next((u for u in logos if isinstance(u, str) and u.startswith(("http://", "https://"))), "")
 
     # -----------------------------
-    # CARD: Logo + Nombre + Precio (misma línea) dentro del contenedor
+    # Card: Name & Price row
     # -----------------------------
-    st.markdown('<div class="cd-card">', unsafe_allow_html=True)
+    st.markdown('<div class="analysis-card">', unsafe_allow_html=True)
 
-    row = st.columns([0.12, 0.55, 0.33], vertical_alignment="bottom")
-
-    with row[0]:
-        if logo_urls:
-            st.markdown('<div class="cd-logo">', unsafe_allow_html=True)
-            st.image(logo_urls[0], width=54)
-            st.markdown("</div>", unsafe_allow_html=True)
-
-    with row[1]:
+    # Row with logo, name and price + delta
+    cols = st.columns([0.13, 0.60, 0.27], gap="small")
+    with cols[0]:
+        if logo_url:
+            st.image(logo_url, width=50)
+    with cols[1]:
         st.markdown(f"### {company_name}")
         st.caption(ticker)
-
-    with row[2]:
+    with cols[2]:
         st.markdown(f"### {_fmt_price(last_price, currency)}")
         if delta_txt:
             st.caption(delta_txt)
@@ -204,21 +174,21 @@ def page_analysis():
     st.markdown("</div>", unsafe_allow_html=True)
 
     # -----------------------------
-    # CARD: KPIs (centrados, grilla moderna SIN bordes)
+    # Card: KPIs grid (Beta, PER TTM, EPS TTM, Target 1Y)
     # -----------------------------
-    st.markdown('<div class="cd-card">', unsafe_allow_html=True)
+    st.markdown('<div class="analysis-card">', unsafe_allow_html=True)
 
-    k1, k2, k3, k4 = st.columns(4)
+    k1, k2, k3, k4 = st.columns(4, gap="small")
     with k1:
         st.caption("Beta")
         st.markdown(f"### {_fmt_kpi(stats.get('beta'))}")
     with k2:
-        st.caption("PER (TTM)")
-        # PE suele ser “x”
+        st.caption("PER TTM")
         pe = stats.get("pe_ttm")
+        # Append "x" only if there is a valid PE
         st.markdown(f"### {_fmt_kpi(pe)}" + ("x" if isinstance(pe, (int, float)) else ""))
     with k3:
-        st.caption("EPS (TTM)")
+        st.caption("EPS TTM")
         st.markdown(f"### {_fmt_kpi(stats.get('eps_ttm'))}")
     with k4:
         st.caption("Target 1Y (est.)")
@@ -226,5 +196,5 @@ def page_analysis():
 
     st.markdown("</div>", unsafe_allow_html=True)
 
-    # Cerramos wrapper principal
+    # Close main wrapper
     st.markdown("</div>", unsafe_allow_html=True)
