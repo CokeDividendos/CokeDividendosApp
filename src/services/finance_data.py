@@ -149,18 +149,20 @@ def get_profile_data(ticker: str) -> dict:
         merged = _json_safe(merged)
         short = merged.get("shortName") or merged.get("longName")
         return {
-            "website": merged.get("website"),
-            "industry": merged.get("industry"),
-            "sector": merged.get("sector"),
-            "longBusinessSummary": merged.get("longBusinessSummary"),
-            "fullTimeEmployees": merged.get("fullTimeEmployees"),
-            "country": merged.get("country"),
-            "city": merged.get("city"),
-            "address1": merged.get("address1"),
-            "phone": merged.get("phone"),
-            "shortName": short,
-            "raw": merged,
+            "website": info.get("website"),
+            "industry": info.get("industry"),
+            "sector": info.get("sector"),
+            "longBusinessSummary": info.get("longBusinessSummary"),
+            "fullTimeEmployees": info.get("fullTimeEmployees"),
+            "country": info.get("country"),
+            "city": info.get("city"),
+            "address1": info.get("address1"),
+            "phone": info.get("phone"),
+            "shortName": info.get("shortName"),
+            "logo_url": info.get("logo_url"),  # ✅ NUEVO
+            "raw": info,
         }
+        
 
     return _cache_get_or_set(key, ttl, _load)
 
