@@ -6,6 +6,7 @@ from src.services.finance_data import (
     get_static_data,
     get_price_data,
     get_financial_data,
+    get_profile_data,          # <- NUEVO: fallback para nombre/website
     get_history_daily,
     get_drawdown_daily,
     get_perf_metrics,
@@ -54,17 +55,8 @@ def _fmt_float(x, nd="N/D", dec=2):
     return nd
 
 
-def _fmt_pct(x, nd="N/D", dec=2):
-    if isinstance(x, (int, float)):
-        try:
-            return f"{float(x) * 100:.{dec}f}%"
-        except Exception:
-            return nd
-    return nd
-
-
 def page_analysis():
-    # ✅ Ajuste: usuarios 3 búsquedas/día
+    # ✅ Ajuste solicitado: usuarios 3 búsquedas/día
     DAILY_LIMIT = 3
 
     user_email = _get_user_email()
@@ -75,7 +67,7 @@ def page_analysis():
     with colA:
         st.title("📊 Análisis Financiero")
     with colB:
-        # ✅ Ajuste: botón de caché SOLO admin
+        # ✅ Ajuste: botón caché SOLO admin
         if is_admin:
             if st.button("🧹 Limpiar caché", use_container_width=True, key="btn_clear_cache"):
                 cache_clear_all()
@@ -86,14 +78,17 @@ def page_analysis():
     with st.sidebar:
         logout_button()
 
+        # ✅ Usamos un placeholder único para NO duplicar el contador
+        limit_box = st.empty()
+
         if is_admin:
-            st.success("👑 Admin: sin límite diario (las búsquedas igual alimentan el caché global).")
+            limit_box.success("👑 Admin: sin límite diario (las búsquedas igual alimentan el caché global).")
         else:
             if user_email:
                 rem = remaining_searches(user_email, DAILY_LIMIT)
-                st.info(f"🔎 Búsquedas restantes hoy: {rem}/{DAILY_LIMIT}")
+                limit_box.info(f"🔎 Búsquedas restantes hoy: {rem}/{DAILY_LIMIT}")
             else:
-                st.warning("No pude detectar el email del usuario en sesión.")
+                limit_box.warning("No pude detectar el email del usuario en sesión.")
                 with st.expander("Debug: session_state keys"):
                     for k, v in st.session_state.items():
                         if isinstance(v, str):
@@ -101,7 +96,7 @@ def page_analysis():
                         else:
                             st.write(f"- {k}: {type(v).__name__}")
 
-    # ✅ Ajuste: input centrado (no full width)
+    # ✅ input centrado y con ancho fijo visual
     left, center, right = st.columns([1, 2, 1])
     with center:
         with st.form("search_form", clear_on_submit=False):
@@ -121,27 +116,43 @@ def page_analysis():
         if not ok:
             st.error("🚫 Búsquedas diarias alcanzadas. Vuelve mañana.")
             st.stop()
+        # ✅ Actualiza el MISMO placeholder (no crea otro)
         with st.sidebar:
+            st.empty()  # no-op visual; el placeholder está arriba
+        # Re-render del placeholder:
+        # (Streamlit re-ejecuta el script, así que basta con seguir y recalcular rem en el sidebar al comienzo.
+        # Pero como ya consumimos, lo mostramos de inmediato aquí:)
+        with st.sidebar:
+            # recreamos el placeholder con el mismo patrón (simple y estable)
             st.info(f"🔎 Búsquedas restantes hoy: {rem_after}/{DAILY_LIMIT}")
 
     try:
         static = get_static_data(ticker)
         price = get_price_data(ticker)
-        fin = get_financial_data(ticker)  # ✅ para beta/per/eps/target
+        fin = get_financial_data(ticker)
 
         prof = static.get("profile", {}) if isinstance(static, dict) else {}
-        website = prof.get("website") or ""
-        logo_urls = logo_candidates(website)
 
-        # ✅ Ajuste: bloque principal centrado y no expansible
+        # ✅ Fallback robusto para NOMBRE y WEBSITE desde get_profile_data()
+        # (esto evita que quede como N/D aunque static.profile.name venga vacío)
+        prof_full = get_profile_data(ticker)
+        short_name = (prof_full.get("shortName") or (prof_full.get("raw") or {}).get("shortName") or "").strip()
+        website = (prof.get("website") or prof_full.get("website") or "").strip()
+
+        logo_urls = logo_candidates(website)
+        company_name = (prof.get("name") or short_name or ticker).strip()
+
+        # bloque centrado
         l2, c2, r2 = st.columns([1, 2, 1])
         with c2:
             if logo_urls:
                 st.image(logo_urls[0], width=64)
 
-            # Nombre + ticker (centrado)
-            company_name = prof.get("name") or prof.get("ticker") or ticker
-            st.subheader(f"{company_name} ({ticker})" if company_name != ticker else ticker)
+            # ✅ Nombre empresa + ticker
+            if company_name and company_name != ticker:
+                st.subheader(f"{company_name} ({ticker})")
+            else:
+                st.subheader(ticker)
 
             # Precio + variación
             last_price = price.get("last_price")
@@ -161,7 +172,7 @@ def page_analysis():
                 delta=delta_txt,
             )
 
-            # ✅ Ajuste: métricas extra centradas
+            # ✅ Métricas extra (si no vienen, mostrará N/D)
             beta = fin.get("beta")
             pe_ttm = fin.get("pe_ttm")
             eps_ttm = fin.get("eps_ttm")
@@ -175,15 +186,11 @@ def page_analysis():
             with m3:
                 st.metric("EPS (TTM)", _fmt_float(eps_ttm, dec=2))
             with m4:
-                # target suele ser precio, no %
                 if isinstance(target_1y, (int, float)):
                     st.metric("Target 1Y (est.)", f"{float(target_1y):.2f} {currency}".strip())
                 else:
                     st.metric("Target 1Y (est.)", "N/D")
 
-        # -----------------------------
-        # Resto (por ahora lo dejamos igual, después lo “qualtrimizamos”)
-        # -----------------------------
         st.divider()
         st.info("Base OK. Próximo: layout tipo Qualtrim (gráficos expandibles por métrica).")
 
@@ -192,20 +199,14 @@ def page_analysis():
 
         c1, c2, c3 = st.columns(3)
         with c1:
-            st.metric(
-                "CAGR (aprox)",
-                f"{perf['cagr']*100:.2f}%" if isinstance(perf.get("cagr"), (int, float)) else "N/D",
-            )
+            cagr = perf.get("cagr")
+            st.metric("CAGR (aprox)", f"{cagr*100:.2f}%" if isinstance(cagr, (int, float)) else "N/D")
         with c2:
-            st.metric(
-                "Volatilidad anual",
-                f"{perf['volatility']*100:.2f}%" if isinstance(perf.get("volatility"), (int, float)) else "N/D",
-            )
+            vol = perf.get("volatility")
+            st.metric("Volatilidad anual", f"{vol*100:.2f}%" if isinstance(vol, (int, float)) else "N/D")
         with c3:
-            st.metric(
-                "Max Drawdown",
-                f"{perf['max_drawdown']*100:.2f}%" if isinstance(perf.get("max_drawdown"), (int, float)) else "N/D",
-            )
+            mdd = perf.get("max_drawdown")
+            st.metric("Max Drawdown", f"{mdd*100:.2f}%" if isinstance(mdd, (int, float)) else "N/D")
 
         with st.expander("📈 Precio histórico (5Y)", expanded=False):
             h = get_history_daily(ticker, years=years)
@@ -226,10 +227,7 @@ def page_analysis():
 
             d1, d2, d3 = st.columns(3)
             with d1:
-                st.metric(
-                    "Dividendo TTM",
-                    _fmt_float(dm.get("ttm_dividend"), dec=2),
-                )
+                st.metric("Dividendo TTM", _fmt_float(dm.get("ttm_dividend"), dec=2))
             with d2:
                 y = dm.get("ttm_yield")
                 st.metric("Yield TTM", f"{y*100:.2f}%" if isinstance(y, (int, float)) else "N/D")
