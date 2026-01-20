@@ -17,7 +17,7 @@ def _get_user_email() -> str:
 
 
 def _get_user_role() -> str:
-    for key in ["auth_role", "role", "user_role", "auth_role", "logged_role"]:
+    for key in ["auth_role", "role", "user_role", "logged_role"]:
         v = st.session_state.get(key)
         if isinstance(v, str) and v:
             return v.strip().lower()
@@ -55,7 +55,8 @@ def page_analysis():
     # SIDEBAR (una sola vez)
     # -----------------------------
     with st.sidebar:
-        logout_button()  # ya tiene key="logout_button" en auth.py
+        logout_button()  # auth.py ya tiene key="logout_button"
+
         if is_admin:
             if st.button("🧹 Limpiar caché", key="clear_cache_btn", use_container_width=True):
                 cache_clear_all()
@@ -73,130 +74,117 @@ def page_analysis():
                 limit_box.warning("No se detectó el correo del usuario.")
 
     # -----------------------------
-    # CSS: FIJAR ANCHO Y CENTRAR (clave)
+    # CSS: fijar ancho REAL del contenido (sin barras grises)
     # -----------------------------
     st.markdown(
         """
         <style>
-          /* Fija el ancho del contenido principal (evita expansión horizontal) */
-          section.main > div.block-container {
-            max-width: 920px;
-            padding-left: 18px;
-            padding-right: 18px;
-            margin: 0 auto;
+          /* Fijar ancho del contenido principal en Streamlit (robusto + !important) */
+          div[data-testid="stAppViewContainer"] section.main div.block-container {
+            max-width: 980px !important;
+            margin: 0 auto !important;
+            padding-left: 18px !important;
+            padding-right: 18px !important;
           }
 
-          /* Un poco más compacto el input/botón */
-          div[data-testid="stForm"] { margin-bottom: 0.25rem; }
-
-          /* “Cards” sin borde (look moderno) */
-          .cd-card {
-            padding: 16px 18px;
-            border-radius: 14px;
-            background: rgba(255,255,255,0.75);
-          }
-          @media (prefers-color-scheme: dark) {
-            .cd-card { background: rgba(30,30,30,0.55); }
+          /* Evitar que algunas filas/containers vuelvan a estirarse */
+          div[data-testid="stVerticalBlock"] {
+            max-width: 980px !important;
           }
 
-          /* Ajuste opcional para que el título no se “desparrame” */
-          .cd-title { margin-top: 0.25rem; margin-bottom: 0.75rem; }
+          /* Ajustes sutiles de spacing para “look moderno” (sin bordes) */
+          h2, h3 { margin-bottom: 0.25rem !important; }
+          [data-testid="stCaptionContainer"] { margin-top: -6px !important; }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
     # -----------------------------
-    # NIVEL 1: TÍTULO (centrado por ancho fijo global)
+    # CONTENIDO CENTRADO EN COLUMNA MEDIA (grilla sin bordes)
     # -----------------------------
-    st.markdown('<div class="cd-title">', unsafe_allow_html=True)
-    st.markdown("## 📊 Análisis Financiero")
-    st.markdown("</div>", unsafe_allow_html=True)
+    pad_l, center, pad_r = st.columns([1, 3, 1], gap="large")
 
-    # -----------------------------
-    # NIVEL 2: BUSCADOR (en card sin borde)
-    # -----------------------------
-    st.markdown('<div class="cd-card">', unsafe_allow_html=True)
-    with st.form("search_form", clear_on_submit=False):
-        ticker = st.text_input("Ticker", value="AAPL").strip().upper()
-        submitted = st.form_submit_button("🔎 Buscar")
-    st.markdown("</div>", unsafe_allow_html=True)
+    with center:
+        # NIVEL 1: TÍTULO
+        st.markdown("## 📊 Análisis Financiero")
 
-    if not submitted:
-        return
+        # NIVEL 2: BUSCADOR (no se expandirá más allá del max-width)
+        with st.form("search_form", clear_on_submit=False):
+            ticker = st.text_input("Ticker", value="AAPL").strip().upper()
+            submitted = st.form_submit_button("🔎 Buscar")
 
-    if not ticker:
-        st.warning("Ingresa un ticker.")
-        return
-
-    # Limitar búsquedas (solo no-admin)
-    if not is_admin and user_email:
-        ok, rem_after = consume_search(user_email, DAILY_LIMIT, cost=1)
-        if not ok:
-            limit_box.error("🚫 Búsquedas diarias alcanzadas. Vuelve mañana.")
+        if not submitted:
             return
-        limit_box.info(f"🔎 Búsquedas restantes hoy: {rem_after}/{DAILY_LIMIT}")
 
-    # -----------------------------
-    # DATA
-    # -----------------------------
-    price = get_price_data(ticker) or {}
-    profile = get_profile_data(ticker) or {}
-    raw = profile.get("raw") if isinstance(profile, dict) else {}
-    stats = get_key_stats(ticker) or {}
+        if not ticker:
+            st.warning("Ingresa un ticker.")
+            return
 
-    company_name = raw.get("longName") or raw.get("shortName") or profile.get("shortName") or ticker
+        # Consume SOLO si NO es admin
+        if (not is_admin) and user_email:
+            ok, rem_after = consume_search(user_email, DAILY_LIMIT, cost=1)
+            if not ok:
+                limit_box.error("🚫 Búsquedas diarias alcanzadas. Vuelve mañana.")
+                return
+            limit_box.info(f"🔎 Búsquedas restantes hoy: {rem_after}/{DAILY_LIMIT}")
 
-    last_price = price.get("last_price")
-    currency = price.get("currency") or ""
-    delta_txt = _fmt_delta(price.get("net_change"), price.get("pct_change"))
+        # -----------------------------
+        # DATA
+        # -----------------------------
+        price = get_price_data(ticker) or {}
+        profile = get_profile_data(ticker) or {}
+        raw = profile.get("raw") if isinstance(profile, dict) else {}
+        stats = get_key_stats(ticker) or {}
 
-    # Logo (evitar el “0”: solo URL válida)
-    website = (profile.get("website") or raw.get("website") or "") if isinstance(profile, dict) else ""
-    logos = logo_candidates(website) if website else []
-    logo_url = next((u for u in logos if isinstance(u, str) and u.startswith(("http://", "https://"))), "")
+        company_name = raw.get("longName") or raw.get("shortName") or profile.get("shortName") or ticker
 
-    # -----------------------------
-    # NIVEL 3: NOMBRE + PRECIO (misma línea) dentro de card
-    # -----------------------------
-    st.markdown('<div class="cd-card" style="margin-top: 12px;">', unsafe_allow_html=True)
+        last_price = price.get("last_price")
+        currency = price.get("currency") or ""
+        delta_txt = _fmt_delta(price.get("net_change"), price.get("pct_change"))
 
-    c_logo, c_name, c_price = st.columns([0.12, 0.58, 0.30], gap="small", vertical_alignment="center")
+        # Logo (evitar el “0”: solo URL válida)
+        website = (profile.get("website") or raw.get("website") or "") if isinstance(profile, dict) else ""
+        logos = logo_candidates(website) if website else []
+        logo_url = next((u for u in logos if isinstance(u, str) and u.startswith(("http://", "https://"))), "")
 
-    with c_logo:
-        if logo_url:
-            st.image(logo_url, width=52)
+        st.write("")  # pequeño respiro visual
 
-    with c_name:
-        st.markdown(f"### {company_name}")
-        st.caption(ticker)
+        # NIVEL 3: LOGO + NOMBRE (izq) y PRECIO + VARIACIÓN (der) en la misma línea
+        c1, c2, c3 = st.columns([0.12, 0.58, 0.30], gap="small", vertical_alignment="center")
 
-    with c_price:
-        st.markdown(f"### {_fmt_price(last_price, currency)}")
-        if delta_txt:
-            st.caption(delta_txt)
+        with c1:
+            if logo_url:
+                st.image(logo_url, width=46)
 
-    st.markdown("</div>", unsafe_allow_html=True)
+        with c2:
+            st.markdown(f"### {company_name}")
+            st.caption(ticker)
 
-    # -----------------------------
-    # NIVEL 4: KPIs (4 columnas) dentro de card
-    # -----------------------------
-    st.markdown('<div class="cd-card" style="margin-top: 12px;">', unsafe_allow_html=True)
+        with c3:
+            st.markdown(f"### {_fmt_price(last_price, currency)}")
+            if delta_txt:
+                st.caption(delta_txt)
 
-    k1, k2, k3, k4 = st.columns(4, gap="small")
-    with k1:
-        st.caption("Beta")
-        st.markdown(f"### {_fmt_kpi(stats.get('beta'))}")
-    with k2:
-        st.caption("PER (TTM)")
-        pe = stats.get("pe_ttm")
-        pe_txt = _fmt_kpi(pe) + ("x" if isinstance(pe, (int, float)) else "")
-        st.markdown(f"### {pe_txt}")
-    with k3:
-        st.caption("EPS (TTM)")
-        st.markdown(f"### {_fmt_kpi(stats.get('eps_ttm'))}")
-    with k4:
-        st.caption("Target 1Y (est.)")
-        st.markdown(f"### {_fmt_kpi(stats.get('target_1y'))}")
+        st.divider()
 
-    st.markdown("</div>", unsafe_allow_html=True)
+        # NIVEL 4: KPIs (grilla 4 columnas, sin bordes)
+        k1, k2, k3, k4 = st.columns(4, gap="large")
+
+        with k1:
+            st.caption("Beta")
+            st.markdown(f"### {_fmt_kpi(stats.get('beta'))}")
+
+        with k2:
+            st.caption("PER (TTM)")
+            pe = stats.get("pe_ttm")
+            pe_txt = (_fmt_kpi(pe) + "x") if isinstance(pe, (int, float)) else "N/D"
+            st.markdown(f"### {pe_txt}")
+
+        with k3:
+            st.caption("EPS (TTM)")
+            st.markdown(f"### {_fmt_kpi(stats.get('eps_ttm'))}")
+
+        with k4:
+            st.caption("Target 1Y (est.)")
+            st.markdown(f"### {_fmt_kpi(stats.get('target_1y'))}")
