@@ -151,25 +151,20 @@ def page_analysis():
         st.write("")  # pequeño respiro visual
 
         # NIVEL 3: LOGO + NOMBRE (izq) y PRECIO + VARIACIÓN (der) en la misma línea
-        c1, c2, = st.columns([0.12, 0.58,], gap="small", vertical_alignment="center")
+        c1, c2, c3 = st.columns([0.12, 0.58, 0.30], gap="small", vertical_alignment="center")
 
         with c1:
-            st.caption("Nombre")
-            st.markdown(f"### {company_name}")
-            st.caption(ticker)
-            st.markdown(f"### {_fmt_price(last_price, currency)}")
-            if delta_txt:
-                st.caption(delta_txt)
-        
-        with c2:
             if logo_url:
                 st.image(logo_url, width=46)
 
         with c2:
-            st.caption("Nombre")
             st.markdown(f"### {company_name}")
             st.caption(ticker)
-            
+
+        with c3:
+            st.markdown(f"### {_fmt_price(last_price, currency)}")
+            if delta_txt:
+                st.caption(delta_txt)
 
         st.divider()
 
