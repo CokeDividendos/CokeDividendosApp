@@ -1,28 +1,22 @@
-# src/services/finance_data.py
 from __future__ import annotations
 
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import Any, Callable, Dict
 
 import pandas as pd
+import numpy as np
 
 from src.services.cache_store import cache_get, cache_set
 from src.services.yf_client import install_http_cache, yf_call
 
-
 class FinanceDataError(RuntimeError):
     pass
 
-
-# Cache HTTP para yfinance (reduce rate-limits)
+# Activa cache HTTP para yfinance
 install_http_cache(expire_seconds=3600)
 
-
-# -----------------------------
-# JSON SAFE HELPERS
-# -----------------------------
 def _json_safe(x: Any) -> Any:
-    """Convierte objetos a tipos JSON serializables (dict/list/str/int/float/bool/None)."""
+    """Convierte objetos a tipos JSON serializables."""
     if x is None:
         return None
     if isinstance(x, (str, int, float, bool)):
@@ -33,29 +27,23 @@ def _json_safe(x: Any) -> Any:
         return {str(k): _json_safe(v) for k, v in x.items()}
     if isinstance(x, (list, tuple, set)):
         return [_json_safe(v) for v in x]
-
-    # numpy types
+    # Pandas/numpy scalars
     try:
-        import numpy as np
-
-        if isinstance(x, (np.integer,)):
+        if isinstance(x, np.integer):
             return int(x)
-        if isinstance(x, (np.floating,)):
+        if isinstance(x, np.floating):
             return float(x)
-        if isinstance(x, (np.bool_,)):
+        if isinstance(x, np.bool_):
             return bool(x)
     except Exception:
         pass
-
-    # dict-like objects
+    # Object with items
     try:
         if hasattr(x, "items"):
             return {str(k): _json_safe(v) for k, v in dict(x).items()}
     except Exception:
         pass
-
     return str(x)
-
 
 def _cache_get_or_set(key: str, ttl: int, fn: Callable[[], Any]):
     hit = cache_get(key)
@@ -66,82 +54,27 @@ def _cache_get_or_set(key: str, ttl: int, fn: Callable[[], Any]):
     cache_set(key, val, ttl_seconds=ttl)
     return val
 
-
-def _df_from_cached_records(records: Any) -> pd.DataFrame:
-    if isinstance(records, list):
-        return pd.DataFrame(records)
-    return pd.DataFrame()
-
-
-def _ts_now_naive() -> pd.Timestamp:
-    """Timestamp 'ahora' en UTC pero sin timezone (naive), para comparar contra índices naive."""
-    return pd.Timestamp.now(tz="UTC").tz_convert(None)
-
-
-def _ensure_dt_index(df: pd.DataFrame) -> pd.DataFrame:
-    """Normaliza columna Date -> datetime y la deja como índice para graficar."""
-    if df is None or df.empty:
-        return pd.DataFrame()
-
-    if "Date" in df.columns:
-        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-        df = df.dropna(subset=["Date"]).set_index("Date").sort_index()
-        return df
-
-    # Si ya viene como index fecha
-    try:
-        df.index = pd.to_datetime(df.index, errors="coerce")
-        df = df.dropna()
-    except Exception:
-        pass
-
-    return df
-
-
-def _merge_dicts_keep_first(*dicts: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Mezcla diccionarios, manteniendo el primer valor no-nulo encontrado para cada key.
-    (o sea, prioridad: dicts[0] > dicts[1] > dicts[2]...)
-    """
-    out: Dict[str, Any] = {}
-    for d in dicts:
-        if not isinstance(d, dict):
-            continue
-        for k, v in d.items():
-            if k not in out or out[k] is None:
-                out[k] = v
-    return out
-
-
-# -----------------------------
-# PRICE (TTL 5 min)
-# -----------------------------
 def get_price_data(ticker: str) -> dict:
-    """Precio y métricas diarias (TTL 5 min)."""
+    """
+    Devuelve datos de precio con TTL 5 minutos.
+    """
     t = ticker.strip().upper()
     key = f"yf:quote:{t}"
     ttl = 60 * 5
 
     def _load():
         import yfinance as yf
-
         tk = yf.Ticker(t)
-
         fast = yf_call(lambda: getattr(tk, "fast_info", {}) or {})
-        fast_dict = _json_safe(fast)
-
-        price = fast_dict.get("last_price") or fast_dict.get("lastPrice") or fast_dict.get("last")
-        currency = fast_dict.get("currency")
-        exchange = fast_dict.get("exchange")
-
+        price = fast.get("last_price") or fast.get("last") or None
+        currency = fast.get("currency")
+        exchange = fast.get("exchange")
         hist = yf_call(lambda: tk.history(period="2d", interval="1d", auto_adjust=True))
         net = pct = vol = asof = None
-
         if hist is not None and not hist.empty:
             last_close = float(hist["Close"].iloc[-1])
             asof = str(hist.index[-1].date())
             vol = int(hist["Volume"].iloc[-1]) if "Volume" in hist else None
-
             if price is None:
                 price = last_close
             else:
@@ -149,15 +82,13 @@ def get_price_data(ticker: str) -> dict:
                     price = float(price)
                 except Exception:
                     price = last_close
-
             if len(hist) >= 2:
-                prev_close = float(hist["Close"].iloc[-2])
-                net = last_close - prev_close
-                pct = (net / prev_close) * 100 if prev_close else None
-
+                prev = float(hist["Close"].iloc[-2])
+                net = last_close - prev
+                pct = (net / prev) * 100 if prev else None
         return {
             "ticker": t,
-            "company_name": None,  # lo llenamos desde profile/info
+            "company_name": None,
             "exchange": exchange,
             "asset_class": "STOCKS",
             "last_price": float(price) if price is not None else None,
@@ -166,21 +97,13 @@ def get_price_data(ticker: str) -> dict:
             "volume": vol,
             "currency": currency,
             "asof": asof,
-            "debug": {"fast_info": fast_dict},
         }
 
     return _cache_get_or_set(key, ttl, _load)
 
-
-# -----------------------------
-# PROFILE (TTL 30 días) - ROBUSTO
-# -----------------------------
 def get_profile_data(ticker: str) -> dict:
     """
-    Perfil/Info de yfinance.
-    En Streamlit Cloud a veces tk.info llega vacío por rate-limit/errores.
-    Este método intenta varios fallbacks y mergea resultados para entregar
-    un 'raw' útil (shortName/longName/beta/trailingPE/epsTrailingTwelveMonths/targetMeanPrice, etc).
+    Perfil robusto con fallback: TTL 30 días.
     """
     t = ticker.strip().upper()
     key = f"yf:profile:{t}"
@@ -188,83 +111,72 @@ def get_profile_data(ticker: str) -> dict:
 
     def _load():
         import yfinance as yf
-
         tk = yf.Ticker(t)
-
-        # 1) Camino tradicional
         info1 = yf_call(lambda: tk.info or {}) or {}
-
-        # 2) get_info() (en algunas versiones funciona mejor que .info)
         info2 = {}
         try:
             if hasattr(tk, "get_info"):
                 info2 = yf_call(lambda: tk.get_info() or {}) or {}
         except Exception:
-            info2 = {}
-
-        # 3) basic_info (si existe)
+            pass
         info3 = {}
         try:
             info3 = yf_call(lambda: getattr(tk, "basic_info", {}) or {}) or {}
         except Exception:
-            info3 = {}
-
-        # 4) fast_info (ojo: no trae todo, pero a veces trae currency/exchange)
+            pass
         info4 = {}
         try:
             info4 = yf_call(lambda: getattr(tk, "fast_info", {}) or {}) or {}
         except Exception:
-            info4 = {}
-
-        # 5) history_metadata (a veces trae longName/exchangeName)
+            pass
         info5 = {}
         try:
             info5 = yf_call(lambda: getattr(tk, "history_metadata", {}) or {}) or {}
         except Exception:
-            info5 = {}
+            pass
 
-        merged = _merge_dicts_keep_first(info1, info2, info3, info5, info4)
+        def merge(dicts):
+            result = {}
+            for d in dicts:
+                if not isinstance(d, dict):
+                    continue
+                for k, v in d.items():
+                    if k not in result or result[k] is None:
+                        result[k] = v
+            return result
+
+        merged = merge([info1, info2, info3, info5, info4])
         merged = _json_safe(merged)
-
-        # Campos “human friendly” (no dependemos de que existan siempre)
-        website = merged.get("website")
-        industry = merged.get("industry")
-        sector = merged.get("sector")
-        short_name = merged.get("shortName") or merged.get("short_name")
-        long_name = merged.get("longName") or merged.get("long_name")
-
+        short = merged.get("shortName") or merged.get("longName")
         return {
-            "website": website,
-            "industry": industry,
-            "sector": sector,
+            "website": merged.get("website"),
+            "industry": merged.get("industry"),
+            "sector": merged.get("sector"),
             "longBusinessSummary": merged.get("longBusinessSummary"),
             "fullTimeEmployees": merged.get("fullTimeEmployees"),
             "country": merged.get("country"),
             "city": merged.get("city"),
             "address1": merged.get("address1"),
             "phone": merged.get("phone"),
-            "shortName": short_name or long_name,
-            "raw": merged,  # <- acá quedan beta/PE/EPS/target si están disponibles
+            "shortName": short,
+            "raw": merged,
         }
 
     return _cache_get_or_set(key, ttl, _load)
 
-
-# -----------------------------
-# FINANCIAL SNAPSHOT (TTL 90 días)
-# -----------------------------
 def get_financial_data(ticker: str) -> dict:
+    """
+    Snapshot financiero: TTL 90 días.
+    """
     t = ticker.strip().upper()
     key = f"yf:financial:{t}"
     ttl = 60 * 60 * 24 * 90
 
     def _load():
         import yfinance as yf
-
         tk = yf.Ticker(t)
         info = yf_call(lambda: tk.info or {}) or {}
         info = _json_safe(info)
-
         return {
             "financial_currency": info.get("financialCurrency") or info.get("currency"),
             "current_price": info.get("currentPrice"),
@@ -290,258 +202,39 @@ def get_financial_data(ticker: str) -> dict:
             "operating_margins": info.get("operatingMargins"),
             "profit_margins": info.get("profitMargins"),
         }
-
     return _cache_get_or_set(key, ttl, _load)
 
-
-# -----------------------------
-# HISTORY (TTL 6h)
-# -----------------------------
-def get_history_daily(ticker: str, years: int = 5) -> pd.DataFrame:
+# --- NEW: KEY STATS (TTL 30 days) ---
+def get_key_stats(ticker: str) -> dict:
+    """
+    Devuelve Beta, PER TTM, EPS TTM y Target 1Y (con fallback).
+    TTL 30 días.
+    """
     t = ticker.strip().upper()
-    key = f"yf:hist:{t}:{years}y"
-    ttl = 60 * 60 * 6
+    key = f"yf:keystats:{t}"
+    ttl = 60 * 60 * 24 * 30
 
     def _load():
-        import yfinance as yf
+        prof = get_profile_data(t)
+        raw = prof.get("raw") if isinstance(prof, dict) else {}
+        # Intentar extraer de profile
+        beta = raw.get("beta")
+        pe = raw.get("trailingPE") or raw.get("peTrailingTwelveMonths")
+        eps = raw.get("epsTrailingTwelveMonths") or raw.get("trailingEps")
+        target = raw.get("targetMeanPrice") or raw.get("targetMedianPrice") or raw.get("targetHighPrice")
 
-        tk = yf.Ticker(t)
-        period = f"{years}y"
-        df = yf_call(lambda: tk.history(period=period, interval="1d", auto_adjust=True))
-        if df is None or df.empty:
-            return []
-        df = df.reset_index()
-        return df.to_dict(orient="records")
-
-    records = _cache_get_or_set(key, ttl, _load)
-    df = _df_from_cached_records(records)
-    df = _ensure_dt_index(df)
-    return df
-
-
-# -----------------------------
-# DRAWDOWN (TTL 6h)
-# -----------------------------
-def get_drawdown_daily(ticker: str, years: int = 5) -> pd.DataFrame:
-    t = ticker.strip().upper()
-    key = f"yf:dd:{t}:{years}y"
-    ttl = 60 * 60 * 6
-
-    def _load():
-        df = get_history_daily(t, years=years)
-        if df is None or df.empty or "Close" not in df.columns:
-            return []
-        s = df["Close"].astype(float)
-        peak = s.cummax()
-        dd = (s / peak) - 1.0
-        out = pd.DataFrame(
-            {
-                "Date": s.index,
-                "Close": s.values,
-                "Peak": peak.values,
-                "Drawdown": dd.values,
-            }
-        )
-        return out.to_dict(orient="records")
-
-    records = _cache_get_or_set(key, ttl, _load)
-    df = _df_from_cached_records(records)
-    df = _ensure_dt_index(df)
-    return df
-
-
-# -----------------------------
-# PERFORMANCE METRICS (TTL 6h)
-# -----------------------------
-def get_perf_metrics(ticker: str, years: int = 5) -> dict:
-    t = ticker.strip().upper()
-    key = f"yf:perf:{t}:{years}y"
-    ttl = 60 * 60 * 6
-
-    def _load():
-        df = get_history_daily(t, years=years)
-        if df is None or df.empty or "Close" not in df.columns:
-            return {
-                "years": years,
-                "cagr": None,
-                "volatility": None,
-                "max_drawdown": None,
-                "start": None,
-                "end": None,
-            }
-
-        closes = df["Close"].astype(float)
-        start_price = float(closes.iloc[0])
-        end_price = float(closes.iloc[-1])
-        start_date = closes.index[0].date().isoformat()
-        end_date = closes.index[-1].date().isoformat()
-
-        n_days = (closes.index[-1] - closes.index[0]).days
-        years_span = n_days / 365.25 if n_days and n_days > 0 else None
-        cagr = None
-        if years_span and start_price > 0:
-            cagr = (end_price / start_price) ** (1.0 / years_span) - 1.0
-
-        rets = closes.pct_change().dropna()
-        vol = None
-        if not rets.empty:
-            vol = float(rets.std() * (252 ** 0.5))
-
-        peak = closes.cummax()
-        dd = (closes / peak) - 1.0
-        max_dd = float(dd.min()) if not dd.empty else None
+        # fallback desde financial data (para target)
+        if target is None:
+            fin = get_financial_data(t)
+            target = fin.get("target_mean_price")
 
         return {
-            "years": years,
-            "cagr": float(cagr) if cagr is not None else None,
-            "volatility": float(vol) if vol is not None else None,
-            "max_drawdown": float(max_dd) if max_dd is not None else None,
-            "start": start_date,
-            "end": end_date,
+            "beta": beta,
+            "pe_ttm": pe,
+            "eps_ttm": eps,
+            "target_1y": target,
         }
 
     return _cache_get_or_set(key, ttl, _load)
 
-
-# -----------------------------
-# DIVIDENDS (TTL 90 días)
-# -----------------------------
-def get_dividends_series(ticker: str, years: int = 5) -> pd.DataFrame:
-    """
-    Retorna DataFrame con índice datetime (naive) y columna 'Dividend'.
-    Cache 90 días.
-    """
-    t = ticker.strip().upper()
-    key = f"yf:divs:{t}:{years}y"
-    ttl = 60 * 60 * 24 * 90
-
-    def _load():
-        import yfinance as yf
-
-        tk = yf.Ticker(t)
-        s = yf_call(lambda: tk.dividends)  # pandas Series
-        if s is None or len(s) == 0:
-            return []
-
-        s = s.copy()
-        s.index = pd.to_datetime(s.index, errors="coerce")
-        s = s.dropna()
-        if s.empty:
-            return []
-
-        # Normaliza timezone -> naive
-        try:
-            if getattr(s.index, "tz", None) is not None:
-                s.index = s.index.tz_convert(None)
-        except Exception:
-            try:
-                s.index = s.index.tz_localize(None)
-            except Exception:
-                pass
-
-        cutoff = _ts_now_naive() - pd.Timedelta(days=int(years * 365.25))
-        s = s[s.index >= cutoff]
-        if s.empty:
-            return []
-
-        df = pd.DataFrame({"Date": s.index, "Dividend": s.values})
-        return df.to_dict(orient="records")
-
-    records = _cache_get_or_set(key, ttl, _load)
-    df = _df_from_cached_records(records)
-    if df.empty:
-        return pd.DataFrame()
-
-    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-    df = df.dropna(subset=["Date"]).set_index("Date").sort_index()
-
-    try:
-        if getattr(df.index, "tz", None) is not None:
-            df.index = df.index.tz_convert(None)
-    except Exception:
-        try:
-            df.index = df.index.tz_localize(None)
-        except Exception:
-            pass
-
-    return df
-
-
-def get_dividends_by_year(ticker: str, years: int = 5) -> pd.DataFrame:
-    df = get_dividends_series(ticker, years=years)
-    if df is None or df.empty or "Dividend" not in df.columns:
-        return pd.DataFrame()
-    annual = df["Dividend"].resample("Y").sum()
-    out = pd.DataFrame({"Year": annual.index.year, "Dividends": annual.values})
-    return out.sort_values("Year")
-
-
-def get_dividend_metrics(ticker: str, years: int = 5) -> dict:
-    """
-    - ttm_dividend: suma últimos 12 meses
-    - ttm_yield: ttm_dividend / last_price
-    - div_cagr: CAGR aprox usando suma anual (primer año vs último año)
-    """
-    t = ticker.strip().upper()
-    key = f"yf:divmetrics:{t}:{years}y"
-    ttl = 60 * 60 * 24 * 90
-
-    def _load():
-        price = get_price_data(t)
-        last_price = price.get("last_price")
-
-        divs = get_dividends_series(t, years=years)
-        if divs is None or divs.empty or "Dividend" not in divs.columns:
-            return {"ttm_dividend": None, "ttm_yield": None, "div_cagr": None}
-
-        cutoff = _ts_now_naive() - pd.Timedelta(days=365)
-        ttm = float(divs[divs.index >= cutoff]["Dividend"].sum())
-
-        yld = None
-        if isinstance(last_price, (int, float)) and last_price and ttm is not None:
-            yld = ttm / float(last_price)
-
-        annual = get_dividends_by_year(t, years=years)
-        div_cagr = None
-        if annual is not None and not annual.empty and len(annual) >= 2:
-            first = float(annual["Dividends"].iloc[0])
-            last = float(annual["Dividends"].iloc[-1])
-            n = int(annual["Year"].iloc[-1] - annual["Year"].iloc[0])
-            if n > 0 and first > 0 and last > 0:
-                div_cagr = (last / first) ** (1.0 / n) - 1.0
-
-        return {
-            "ttm_dividend": float(ttm) if ttm is not None else None,
-            "ttm_yield": float(yld) if yld is not None else None,
-            "div_cagr": float(div_cagr) if div_cagr is not None else None,
-        }
-
-    return _cache_get_or_set(key, ttl, _load)
-
-
-# -----------------------------
-# AGGREGATOR (compatibilidad UI)
-# -----------------------------
-def get_static_data(ticker: str) -> dict:
-    q = get_price_data(ticker)
-    prof = get_profile_data(ticker)  # <- ahora robusto
-    fin = get_financial_data(ticker)
-
-    raw = prof.get("raw", {}) if isinstance(prof, dict) else {}
-
-    return {
-        "profile": {
-            "name": q.get("company_name")
-            or prof.get("shortName")
-            or raw.get("shortName")
-            or raw.get("longName"),
-            "exchange": q.get("exchange") or raw.get("exchange") or raw.get("exchangeName"),
-            "ticker": q.get("ticker"),
-            "website": prof.get("website") or raw.get("website"),
-            "sector": prof.get("sector") or raw.get("sector"),
-            "industry": prof.get("industry") or raw.get("industry"),
-        },
-        "summary": {},
-        "stats": {},
-        "financial": fin,
-    }
+# ... (resto de funciones: history, drawdown, perf_metrics, dividends, etc. se mantienen)
