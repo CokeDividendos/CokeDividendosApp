@@ -2,7 +2,12 @@
 import streamlit as st
 
 from src.services.usage_limits import remaining_searches, consume_search
-from src.services.finance_data import get_price_data, get_profile_data, get_key_stats
+from src.services.finance_data import (
+    get_price_data,
+    get_profile_data,
+    get_key_stats,
+    get_dividend_kpis,   # ✅ NUEVO
+)
 from src.services.logos import logo_candidates
 from src.auth import logout_button
 from src.services.cache_store import cache_clear_all
@@ -47,6 +52,10 @@ def _fmt_delta(net, pct) -> tuple[str | None, float | None]:
 
 def _fmt_kpi(x, suffix: str = "", decimals: int = 2) -> str:
     return f"{x:.{decimals}f}{suffix}" if isinstance(x, (int, float)) else "N/D"
+
+
+def _fmt_pct(x, decimals: int = 2) -> str:
+    return f"{x:.{decimals}f}%" if isinstance(x, (int, float)) else "N/D"
 
 
 def page_analysis():
@@ -103,8 +112,8 @@ def page_analysis():
     pad_l, center, pad_r = st.columns([1, 3, 1], gap="large")
 
     with center:
-        # NIVEL 1: TÍTULO
-        
+        # NIVEL 1: TÍTULO (si lo tienes arriba en otra parte, déjalo vacío)
+        # st.title("📊 Análisis Financiero")
 
         # NIVEL 2: BUSCADOR
         with st.form("search_form", clear_on_submit=False):
@@ -133,6 +142,7 @@ def page_analysis():
         profile = get_profile_data(ticker) or {}
         raw = profile.get("raw") if isinstance(profile, dict) else {}
         stats = get_key_stats(ticker) or {}
+        divk = get_dividend_kpis(ticker) or {}  # ✅ NUEVO (cacheado)
 
         company_name = raw.get("longName") or raw.get("shortName") or profile.get("shortName") or ticker
 
@@ -140,7 +150,7 @@ def page_analysis():
         currency = price.get("currency") or ""
         delta_txt, pct_val = _fmt_delta(price.get("net_change"), price.get("pct_change"))
 
-        # Logo (best effort) - evita el "0"
+        # Logo (best effort)
         website = (profile.get("website") or raw.get("website") or "") if isinstance(profile, dict) else ""
         logos = logo_candidates(website) if website else []
         logo_url = next((u for u in logos if isinstance(u, str) and u.startswith(("http://", "https://"))), "")
@@ -155,15 +165,12 @@ def page_analysis():
                 st.image(logo_url, width=46)
 
         with c2:
-            # Nombre grande
             st.caption("Nombre")
             st.markdown(f"### {company_name}")
 
-            # Precio grande (mismo tamaño)
             st.caption("Precio")
             st.markdown(f"### {_fmt_price(last_price, currency)}")
 
-            # Variación debajo, con color
             if delta_txt:
                 color = "#16a34a" if (pct_val is not None and pct_val >= 0) else "#dc2626"
                 st.markdown(
@@ -193,3 +200,35 @@ def page_analysis():
         with k4:
             st.caption("Target 1Y (est.)")
             st.markdown(f"### {_fmt_kpi(stats.get('target_1y'))}")
+
+        # -----------------------------
+        # NIVEL 5: KPIs Dividendos (6 cards, cacheados)
+        # -----------------------------
+        st.divider()
+
+        d1, d2, d3, d4, d5, d6 = st.columns(6, gap="large")
+
+        with d1:
+            st.caption("Dividend Yield")
+            st.markdown(f"### {_fmt_pct(divk.get('dividend_yield'))}")
+
+        with d2:
+            st.caption("Forward Div. Yield")
+            st.markdown(f"### {_fmt_pct(divk.get('forward_div_yield'))}")
+
+        with d3:
+            st.caption("Dividendo Anual $")
+            st.markdown(f"### {_fmt_kpi(divk.get('annual_dividend'), decimals=2)}")
+
+        with d4:
+            st.caption("PayOut Ratio %")
+            st.markdown(f"### {_fmt_pct(divk.get('payout_ratio'))}")
+
+        with d5:
+            st.caption("Ex-Date fecha")
+            exd = divk.get("ex_div_date")
+            st.markdown(f"### {exd if isinstance(exd, str) and exd else 'N/D'}")
+
+        with d6:
+            st.caption("Próximo Dividendo $")
+            st.markdown(f"### {_fmt_kpi(divk.get('next_dividend'), decimals=2)}")
