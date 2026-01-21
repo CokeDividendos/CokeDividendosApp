@@ -207,8 +207,8 @@ def page_analysis():
         # -----------------------------
         st.divider()
    
-        d1, d2, d3, d4, d5, d6 = st.columns(6, gap="large")
-
+        d1, d2, d3, = st.columns(3, gap="large")
+        
         with d1:
             st.caption("Dividend Yield")
             st.markdown(f"### {_fmt_pct(divk.get('dividend_yield'))}")
@@ -221,6 +221,8 @@ def page_analysis():
             st.caption("Dividendo Anual $")
             st.markdown(f"### {_fmt_kpi(divk.get('annual_dividend'), decimals=2)}")
 
+        d4, d5, d6 = st.columns(3, gap="large")
+        
         with d4:
             st.caption("PayOut Ratio %")
             st.markdown(f"### {_fmt_pct(divk.get('payout_ratio'))}")
