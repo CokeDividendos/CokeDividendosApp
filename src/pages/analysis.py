@@ -1,6 +1,5 @@
 # src/pages/analysis.py
 import streamlit as st
-st.caption("BUILD: 2026-01-21 / A-test")
 
 from src.services.usage_limits import remaining_searches, consume_search
 from src.services.finance_data import (
