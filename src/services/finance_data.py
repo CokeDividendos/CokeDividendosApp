@@ -158,40 +158,22 @@ def get_price_data(ticker: str) -> dict:
 def get_profile_data(ticker: str) -> dict:
     """
     Perfil robusto con fallback: TTL 30 días.
-    (Si Yahoo rate-limitea, stale-if-error evita caída.)
+    Evita llamadas que disparen history_metadata (fuente típica de rate limit).
     """
     t = ticker.strip().upper()
-    key = f"yf:profile:{t}"
+    key = f"yf:profile:v2:{t}"   # 👈 versionado para no reutilizar cache antiguo malo
     ttl = 60 * 60 * 24 * 30
 
     def _load():
         import yfinance as yf
-
         tk = yf.Ticker(t)
 
+        # Pedimos info de forma controlada (sin fast_info/history_metadata)
         info1 = yf_call(lambda: tk.info or {}) or {}
         info2 = {}
         try:
             if hasattr(tk, "get_info"):
                 info2 = yf_call(lambda: tk.get_info() or {}) or {}
-        except Exception:
-            pass
-
-        info3 = {}
-        try:
-            info3 = yf_call(lambda: getattr(tk, "basic_info", {}) or {}) or {}
-        except Exception:
-            pass
-
-        info4 = {}
-        try:
-            info4 = yf_call(lambda: getattr(tk, "fast_info", {}) or {}) or {}
-        except Exception:
-            pass
-
-        info5 = {}
-        try:
-            info5 = yf_call(lambda: getattr(tk, "history_metadata", {}) or {}) or {}
         except Exception:
             pass
 
@@ -205,8 +187,9 @@ def get_profile_data(ticker: str) -> dict:
                         result[k] = v
             return result
 
-        merged = merge([info1, info2, info3, info5, info4])
+        merged = merge([info1, info2])
         merged = _json_safe(merged)
+
         short = merged.get("shortName") or merged.get("longName")
 
         return {
@@ -220,10 +203,11 @@ def get_profile_data(ticker: str) -> dict:
             "address1": merged.get("address1"),
             "phone": merged.get("phone"),
             "shortName": short,
-            "raw": merged,
+            "raw": merged,   # 👈 acá deberían venir beta/trailingPE/epsTTM/targetMeanPrice cuando existan
         }
 
     return _cache_get_or_set(key, ttl, _load)
+
 
 
 # -----------------------------
@@ -282,7 +266,7 @@ def get_key_stats(ticker: str) -> dict:
     TTL 30 días.
     """
     t = ticker.strip().upper()
-    key = f"yf:keystats:{t}"
+    key = f"yf:keystats:v2:{t}"  # 👈 versionado para refrescar sin limpiar todo
     ttl = 60 * 60 * 24 * 30
 
     def _load():
@@ -294,6 +278,7 @@ def get_key_stats(ticker: str) -> dict:
         eps = raw.get("epsTrailingTwelveMonths") or raw.get("trailingEps")
         target = raw.get("targetMeanPrice") or raw.get("targetMedianPrice") or raw.get("targetHighPrice")
 
+        # Fallback: si faltan cosas, intenta financial_data (solo target normalmente)
         if target is None:
             fin = get_financial_data(t)
             target = fin.get("target_mean_price")
@@ -306,3 +291,4 @@ def get_key_stats(ticker: str) -> dict:
         }
 
     return _cache_get_or_set(key, ttl, _load)
+
