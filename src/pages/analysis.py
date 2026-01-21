@@ -206,36 +206,31 @@ def page_analysis():
         # NIVEL 5: KPIs Dividendos (6 cards, cacheados)
         # -----------------------------
         st.divider()
-        
-        st.divider()
+   
+        d1, d2, d3, d4, d5, d6 = st.columns(6, gap="large")
 
-        # --- NUEVOS KPIs DIVIDENDOS (2 filas x 3 columnas) ---
-        # divk debe venir de get_dividend_kpis(ticker) (como ya lo tienes)
-        r1c1, r1c2, r1c3 = st.columns(3, gap="large")
-        
-        with r1c1:
+        with d1:
             st.caption("Dividend Yield")
-            st.markdown(f"### {divk.get('dividend_yield_txt', 'N/D')}")
-        
-        with r1c2:
+            st.markdown(f"### {_fmt_pct(divk.get('dividend_yield'))}")
+
+        with d2:
             st.caption("Forward Div. Yield")
-            st.markdown(f"### {divk.get('forward_yield_txt', 'N/D')}")
-        
-        with r1c3:
+            st.markdown(f"### {_fmt_pct(divk.get('forward_div_yield'))}")
+
+        with d3:
             st.caption("Dividendo Anual $")
-            st.markdown(f"### {divk.get('annual_dividend_txt', 'N/D')}")
-        
-        r2c1, r2c2, r2c3 = st.columns(3, gap="large")
-        
-        with r2c1:
+            st.markdown(f"### {_fmt_kpi(divk.get('annual_dividend'), decimals=2)}")
+
+        with d4:
             st.caption("PayOut Ratio %")
-            st.markdown(f"### {divk.get('payout_ratio_txt', 'N/D')}")
-        
-        with r2c2:
+            st.markdown(f"### {_fmt_pct(divk.get('payout_ratio'))}")
+
+        with d5:
             st.caption("Ex-Date fecha")
-            st.markdown(f"### {divk.get('ex_date_txt', 'N/D')}")
-        
-        with r2c3:
+            exd = divk.get("ex_div_date")
+            st.markdown(f"### {exd if isinstance(exd, str) and exd else 'N/D'}")
+
+        with d6:
             st.caption("Próximo Dividendo $")
-            st.markdown(f"### {divk.get('next_dividend_txt', 'N/D')}")
+            st.markdown(f"### {_fmt_kpi(divk.get('next_dividend'), decimals=2)}")
 
