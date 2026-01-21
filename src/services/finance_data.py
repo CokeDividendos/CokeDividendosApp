@@ -1,21 +1,19 @@
 from __future__ import annotations
 
-from datetime import datetime, date
-from typing import Any, Callable
+from datetime import datetime, date, timedelta
+from typing import Any, Callable, Dict
 
+import pandas as pd
 import numpy as np
 
 from src.services.cache_store import cache_get, cache_set
 from src.services.yf_client import install_http_cache, yf_call
 
-
 class FinanceDataError(RuntimeError):
     pass
 
-
 # Activa cache HTTP para yfinance
 install_http_cache(expire_seconds=3600)
-
 
 def _json_safe(x: Any) -> Any:
     """Convierte objetos a tipos JSON serializables."""
@@ -29,8 +27,7 @@ def _json_safe(x: Any) -> Any:
         return {str(k): _json_safe(v) for k, v in x.items()}
     if isinstance(x, (list, tuple, set)):
         return [_json_safe(v) for v in x]
-
-    # numpy scalars
+    # Pandas/numpy scalars
     try:
         if isinstance(x, np.integer):
             return int(x)
@@ -40,16 +37,13 @@ def _json_safe(x: Any) -> Any:
             return bool(x)
     except Exception:
         pass
-
-    # dict-like
+    # Object with items
     try:
         if hasattr(x, "items"):
             return {str(k): _json_safe(v) for k, v in dict(x).items()}
     except Exception:
         pass
-
     return str(x)
-
 
 def _cache_get_or_set(key: str, ttl: int, fn: Callable[[], Any]):
     hit = cache_get(key)
@@ -60,120 +54,86 @@ def _cache_get_or_set(key: str, ttl: int, fn: Callable[[], Any]):
     cache_set(key, val, ttl_seconds=ttl)
     return val
 
-
-# -----------------------------
-# PRICE (TTL 5 min)
-# -----------------------------
 def get_price_data(ticker: str) -> dict:
+    """
+    Devuelve datos de precio con TTL 5 minutos.
+    """
     t = ticker.strip().upper()
     key = f"yf:quote:{t}"
     ttl = 60 * 5
 
     def _load():
         import yfinance as yf
-
         tk = yf.Ticker(t)
-
-        fast = {}
-        try:
-            fast = yf_call(lambda: getattr(tk, "fast_info", {}) or {}) or {}
-        except Exception:
-            fast = {}
-        fast = _json_safe(fast) if isinstance(fast, (dict, list, tuple, set)) else {}
-
-        price = fast.get("last_price") or fast.get("lastPrice") or fast.get("last")
+        fast = yf_call(lambda: getattr(tk, "fast_info", {}) or {})
+        price = fast.get("last_price") or fast.get("last") or None
         currency = fast.get("currency")
         exchange = fast.get("exchange")
-
-        hist = None
-        try:
-            hist = yf_call(lambda: tk.history(period="2d", interval="1d", auto_adjust=True))
-        except Exception:
-            hist = None
-
+        hist = yf_call(lambda: tk.history(period="2d", interval="1d", auto_adjust=True))
         net = pct = vol = asof = None
-        if hist is not None and getattr(hist, "empty", True) is False:
-            try:
-                last_close = float(hist["Close"].iloc[-1])
-                asof = str(hist.index[-1].date())
-                vol = int(hist["Volume"].iloc[-1]) if "Volume" in hist else None
-
-                if price is None:
+        if hist is not None and not hist.empty:
+            last_close = float(hist["Close"].iloc[-1])
+            asof = str(hist.index[-1].date())
+            vol = int(hist["Volume"].iloc[-1]) if "Volume" in hist else None
+            if price is None:
+                price = last_close
+            else:
+                try:
+                    price = float(price)
+                except Exception:
                     price = last_close
-                else:
-                    try:
-                        price = float(price)
-                    except Exception:
-                        price = last_close
-
-                if len(hist) >= 2:
-                    prev = float(hist["Close"].iloc[-2])
-                    net = last_close - prev
-                    pct = (net / prev) * 100 if prev else None
-            except Exception:
-                pass
-
+            if len(hist) >= 2:
+                prev = float(hist["Close"].iloc[-2])
+                net = last_close - prev
+                pct = (net / prev) * 100 if prev else None
         return {
             "ticker": t,
             "company_name": None,
             "exchange": exchange,
             "asset_class": "STOCKS",
-            "last_price": float(price) if isinstance(price, (int, float)) else (float(price) if price is not None else None),
-            "net_change": float(net) if isinstance(net, (int, float)) else None,
-            "pct_change": float(pct) if isinstance(pct, (int, float)) else None,
-            "volume": int(vol) if isinstance(vol, (int, float)) else None,
+            "last_price": float(price) if price is not None else None,
+            "net_change": float(net) if net is not None else None,
+            "pct_change": float(pct) if pct is not None else None,
+            "volume": vol,
             "currency": currency,
             "asof": asof,
         }
 
     return _cache_get_or_set(key, ttl, _load)
 
-
-# -----------------------------
-# PROFILE (TTL 30 días)
-# -----------------------------
 def get_profile_data(ticker: str) -> dict:
+    """
+    Perfil robusto con fallback: TTL 30 días.
+    """
     t = ticker.strip().upper()
     key = f"yf:profile:{t}"
     ttl = 60 * 60 * 24 * 30
 
     def _load():
         import yfinance as yf
-
         tk = yf.Ticker(t)
-
-        # ✅ Siempre inicializados (evita NameError sí o sí)
-        info1 = {}
+        info1 = yf_call(lambda: tk.info or {}) or {}
         info2 = {}
-        info3 = {}
-        info4 = {}
-        info5 = {}
-
-        try:
-            info1 = yf_call(lambda: tk.info or {}) or {}
-        except Exception:
-            info1 = {}
-
         try:
             if hasattr(tk, "get_info"):
                 info2 = yf_call(lambda: tk.get_info() or {}) or {}
         except Exception:
-            info2 = {}
-
+            pass
+        info3 = {}
         try:
             info3 = yf_call(lambda: getattr(tk, "basic_info", {}) or {}) or {}
         except Exception:
-            info3 = {}
-
+            pass
+        info4 = {}
         try:
             info4 = yf_call(lambda: getattr(tk, "fast_info", {}) or {}) or {}
         except Exception:
-            info4 = {}
-
+            pass
+        info5 = {}
         try:
             info5 = yf_call(lambda: getattr(tk, "history_metadata", {}) or {}) or {}
         except Exception:
-            info5 = {}
+            pass
 
         def merge(dicts):
             result = {}
@@ -187,11 +147,7 @@ def get_profile_data(ticker: str) -> dict:
 
         merged = merge([info1, info2, info3, info5, info4])
         merged = _json_safe(merged)
-        if not isinstance(merged, dict):
-            merged = {}
-
         short = merged.get("shortName") or merged.get("longName")
-
         return {
             "website": merged.get("website"),
             "industry": merged.get("industry"),
@@ -203,34 +159,24 @@ def get_profile_data(ticker: str) -> dict:
             "address1": merged.get("address1"),
             "phone": merged.get("phone"),
             "shortName": short,
-            "logo_url": merged.get("logo_url") or merged.get("logoUrl") or None,
             "raw": merged,
         }
 
     return _cache_get_or_set(key, ttl, _load)
 
-
-# -----------------------------
-# FINANCIAL SNAPSHOT (TTL 90 días)
-# -----------------------------
 def get_financial_data(ticker: str) -> dict:
+    """
+    Snapshot financiero: TTL 90 días.
+    """
     t = ticker.strip().upper()
     key = f"yf:financial:{t}"
     ttl = 60 * 60 * 24 * 90
 
     def _load():
         import yfinance as yf
-
         tk = yf.Ticker(t)
-        info = {}
-        try:
-            info = yf_call(lambda: tk.info or {}) or {}
-        except Exception:
-            info = {}
+        info = yf_call(lambda: tk.info or {}) or {}
         info = _json_safe(info)
-        if not isinstance(info, dict):
-            info = {}
-
         return {
             "financial_currency": info.get("financialCurrency") or info.get("currency"),
             "current_price": info.get("currentPrice"),
@@ -256,33 +202,31 @@ def get_financial_data(ticker: str) -> dict:
             "operating_margins": info.get("operatingMargins"),
             "profit_margins": info.get("profitMargins"),
         }
-
     return _cache_get_or_set(key, ttl, _load)
 
-
-# -----------------------------
-# KEY STATS (TTL 30 días)
-# -----------------------------
+# --- NEW: KEY STATS (TTL 30 days) ---
 def get_key_stats(ticker: str) -> dict:
+    """
+    Devuelve Beta, PER TTM, EPS TTM y Target 1Y (con fallback).
+    TTL 30 días.
+    """
     t = ticker.strip().upper()
     key = f"yf:keystats:{t}"
     ttl = 60 * 60 * 24 * 30
 
     def _load():
-        prof = get_profile_data(t) or {}
+        prof = get_profile_data(t)
         raw = prof.get("raw") if isinstance(prof, dict) else {}
-        if not isinstance(raw, dict):
-            raw = {}
-
+        # Intentar extraer de profile
         beta = raw.get("beta")
         pe = raw.get("trailingPE") or raw.get("peTrailingTwelveMonths")
         eps = raw.get("epsTrailingTwelveMonths") or raw.get("trailingEps")
         target = raw.get("targetMeanPrice") or raw.get("targetMedianPrice") or raw.get("targetHighPrice")
 
+        # fallback desde financial data (para target)
         if target is None:
-            fin = get_financial_data(t) or {}
-            if isinstance(fin, dict):
-                target = fin.get("target_mean_price")
+            fin = get_financial_data(t)
+            target = fin.get("target_mean_price")
 
         return {
             "beta": beta,
