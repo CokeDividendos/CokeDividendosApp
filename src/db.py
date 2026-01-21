@@ -4,7 +4,7 @@ from __future__ import annotations
 import base64
 import json
 import os
-from dataclasses import dataclass
+import sqlite3
 from datetime import datetime, timezone
 from hashlib import pbkdf2_hmac
 from pathlib import Path
@@ -14,6 +14,9 @@ from typing import Any, Dict, Optional
 # Repo root = .../src/.. (porque este archivo es src/db.py)
 REPO_ROOT = Path(__file__).resolve().parents[1]
 USERS_PATH = REPO_ROOT / "data" / "users.json"
+
+# SQLite path (absoluto, para evitar problemas de cwd en deploy)
+_DB_PATH = REPO_ROOT / "data" / "app.sqlite3"
 
 
 def _now_iso() -> str:
@@ -37,7 +40,6 @@ def load_users() -> Dict[str, Dict[str, Any]]:
         data = json.loads(raw)
         if not isinstance(data, dict):
             return {}
-        # Normaliza llaves a email lower
         out: Dict[str, Dict[str, Any]] = {}
         for k, v in data.items():
             if isinstance(v, dict):
@@ -111,47 +113,63 @@ def has_any_user() -> bool:
     users = load_users()
     return len(users) > 0
 
-# --- Compatibility / App bootstrap ---
-def init_db() -> None:
-    """
-    Compatibilidad: algunas partes del proyecto llaman init_db().
-    En este diseño, solo necesitamos asegurar que exista data/users.json.
-    """
-    ensure_users_file()
-
-# --- SQLite (cache + soporte futuro) ---
-import os
-import sqlite3
-from pathlib import Path
-
-_DB_PATH = Path("data") / "app.sqlite3"
 
 def get_conn() -> sqlite3.Connection:
     """
-    Devuelve una conexión SQLite lista para usar.
-    Crea data/app.sqlite3 y las tablas necesarias si no existen.
+    Devuelve una conexión SQLite lista para uso concurrente en Streamlit Cloud.
+    - WAL para mejor concurrencia (lecturas + escrituras).
+    - busy_timeout + timeout para reducir "database is locked".
     """
-    Path("data").mkdir(parents=True, exist_ok=True)
+    (REPO_ROOT / "data").mkdir(parents=True, exist_ok=True)
 
-    conn = sqlite3.connect(str(_DB_PATH), check_same_thread=False)
+    conn = sqlite3.connect(
+        str(_DB_PATH),
+        check_same_thread=False,
+        timeout=30,  # más tolerante a locks
+    )
     conn.row_factory = sqlite3.Row
 
-    # Tabla de caché (para evitar rate-limits / too many requests)
-    conn.execute("""
+    # PRAGMAs para concurrencia y performance segura
+    try:
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
+        conn.execute("PRAGMA foreign_keys=ON;")
+        conn.execute("PRAGMA temp_store=MEMORY;")
+        conn.execute("PRAGMA busy_timeout=30000;")  # 30s
+    except Exception:
+        pass
+
+    # Tabla cache legacy (si alguna parte la usa)
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS cache (
             key TEXT PRIMARY KEY,
             value_json TEXT NOT NULL,
             expires_at INTEGER
         )
-    """)
+        """
+    )
+
+    # Tabla kv_cache (la que usa src/services/cache_store.py)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS kv_cache (
+            key TEXT PRIMARY KEY,
+            value_json TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            ttl_seconds INTEGER
+        )
+        """
+    )
+
     conn.commit()
     return conn
 
-# --- Compatibility / App bootstrap ---
+
 def init_db() -> None:
     """
-    Compatibilidad: el router llama init_db() al iniciar.
-    Aquí aseguramos que exista el storage de usuarios y el SQLite de caché.
+    Asegura el storage de usuarios y el SQLite.
     """
-    ensure_users_file()   # tu JSON de usuarios
-    _ = get_conn()        # crea el SQLite y tabla cache si faltan
+    ensure_users_file()
+    conn = get_conn()
+    conn.close()
