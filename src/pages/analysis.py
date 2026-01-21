@@ -1,6 +1,6 @@
 # src/pages/analysis.py
 import streamlit as st
-
+Build: 2026-01-2
 from src.services.usage_limits import remaining_searches, consume_search
 from src.services.finance_data import (
     get_price_data,
