@@ -3,11 +3,12 @@ from __future__ import annotations
 from datetime import datetime, date
 from typing import Any, Callable
 
-import numpy as np
 import pandas as pd
+import numpy as np
 
 from src.services.cache_store import cache_get, cache_set
 from src.services.yf_client import install_http_cache, yf_call
+from src.db import get_conn
 
 
 class FinanceDataError(RuntimeError):
@@ -18,6 +19,9 @@ class FinanceDataError(RuntimeError):
 install_http_cache(expire_seconds=3600)
 
 
+# -----------------------------
+# JSON SAFE
+# -----------------------------
 def _json_safe(x: Any) -> Any:
     """Convierte objetos a tipos JSON serializables."""
     if x is None:
@@ -31,6 +35,7 @@ def _json_safe(x: Any) -> Any:
     if isinstance(x, (list, tuple, set)):
         return [_json_safe(v) for v in x]
 
+    # Pandas/numpy scalars
     try:
         if isinstance(x, np.integer):
             return int(x)
@@ -41,6 +46,7 @@ def _json_safe(x: Any) -> Any:
     except Exception:
         pass
 
+    # Object with items
     try:
         if hasattr(x, "items"):
             return {str(k): _json_safe(v) for k, v in dict(x).items()}
@@ -50,20 +56,61 @@ def _json_safe(x: Any) -> Any:
     return str(x)
 
 
+# -----------------------------
+# STALE CACHE (no expira / no borra)
+# -----------------------------
+def _cache_get_stale(key: str) -> Any | None:
+    """
+    Lee DIRECTO desde kv_cache sin aplicar TTL ni borrar expirados.
+    Sirve para 'stale-if-error' cuando Yahoo rate-limitea.
+    """
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        # tu cache_store crea kv_cache, usamos la misma tabla
+        cur.execute("SELECT value_json FROM kv_cache WHERE key = ?", (key,))
+        row = cur.fetchone()
+        conn.close()
+        if not row:
+            return None
+        import json
+        return json.loads(row["value_json"])
+    except Exception:
+        return None
+
+
 def _cache_get_or_set(key: str, ttl: int, fn: Callable[[], Any]):
+    """
+    - Hit normal: cache_get (respeta TTL)
+    - Miss: calcula y cachea
+    - Si falla (rate-limit u otro): devuelve stale si existe para evitar caídas
+    """
     hit = cache_get(key)
     if hit is not None:
         return hit
-    val = fn()
-    val = _json_safe(val)
-    cache_set(key, val, ttl_seconds=ttl)
-    return val
+
+    try:
+        val = fn()
+        val = _json_safe(val)
+        cache_set(key, val, ttl_seconds=ttl)
+        return val
+    except Exception as e:
+        stale = _cache_get_stale(key)
+        if stale is not None:
+            return stale
+        raise FinanceDataError(str(e))
 
 
+# -----------------------------
+# PRICE (TTL 5 min)
+# -----------------------------
 def get_price_data(ticker: str) -> dict:
     """
     Devuelve datos de precio con TTL 5 minutos.
-    Importante: evitar fast_info.get('currency') porque puede gatillar requests extra y rate-limit.
+
+    CLAVE: NO tocamos fast_info.get("currency") ni nada que dispare history_metadata.
+    Usamos UNA llamada: history(2d, 1d).
+    Si Yahoo rate-limitea, devolvemos stale cache (si existe) y NO crashea.
     """
     t = ticker.strip().upper()
     key = f"yf:quote:{t}"
@@ -74,7 +121,6 @@ def get_price_data(ticker: str) -> dict:
 
         tk = yf.Ticker(t)
 
-        # 1) UNA llamada principal: history() 2d
         hist = yf_call(lambda: tk.history(period="2d", interval="1d", auto_adjust=True))
 
         last_price = net = pct = vol = asof = None
@@ -89,51 +135,30 @@ def get_price_data(ticker: str) -> dict:
                 net = last_close - prev
                 pct = (net / prev) * 100 if prev else None
 
-        # 2) Best-effort: intenta fast_info pero SIN acceder a keys que disparen requests raras
-        currency = None
-        exchange = None
-        try:
-            fast = yf_call(lambda: getattr(tk, "fast_info", {}) or {})
-            # convertir a dict "real" si se puede (para evitar __getitem__)
-            fast_d = {}
-            if isinstance(fast, dict):
-                fast_d = fast
-            else:
-                try:
-                    fast_d = dict(fast)
-                except Exception:
-                    fast_d = {}
-
-            # OJO: sólo lee si están presentes como dict normal
-            currency = fast_d.get("currency") or currency
-            exchange = fast_d.get("exchange") or exchange
-            if last_price is None:
-                lp = fast_d.get("last_price") or fast_d.get("lastPrice") or fast_d.get("last")
-                if isinstance(lp, (int, float)):
-                    last_price = float(lp)
-        except Exception:
-            # si Yahoo rate-limitea, igual devolvemos lo que tengamos de history()
-            pass
-
+        # currency/exchange quedan best-effort (None) para NO disparar requests extra
         return {
             "ticker": t,
             "company_name": None,
-            "exchange": exchange,
+            "exchange": None,
             "asset_class": "STOCKS",
             "last_price": float(last_price) if last_price is not None else None,
             "net_change": float(net) if net is not None else None,
             "pct_change": float(pct) if pct is not None else None,
             "volume": vol,
-            "currency": currency,
+            "currency": None,
             "asof": asof,
         }
 
     return _cache_get_or_set(key, ttl, _load)
 
 
+# -----------------------------
+# PROFILE (TTL 30 días)
+# -----------------------------
 def get_profile_data(ticker: str) -> dict:
     """
     Perfil robusto con fallback: TTL 30 días.
+    (Si Yahoo rate-limitea, stale-if-error evita caída.)
     """
     t = ticker.strip().upper()
     key = f"yf:profile:{t}"
@@ -201,6 +226,9 @@ def get_profile_data(ticker: str) -> dict:
     return _cache_get_or_set(key, ttl, _load)
 
 
+# -----------------------------
+# FINANCIAL SNAPSHOT (TTL 90 días)
+# -----------------------------
 def get_financial_data(ticker: str) -> dict:
     """
     Snapshot financiero: TTL 90 días.
@@ -245,6 +273,9 @@ def get_financial_data(ticker: str) -> dict:
     return _cache_get_or_set(key, ttl, _load)
 
 
+# -----------------------------
+# KEY STATS (TTL 30 días)
+# -----------------------------
 def get_key_stats(ticker: str) -> dict:
     """
     Devuelve Beta, PER TTM, EPS TTM y Target 1Y (con fallback).
