@@ -211,28 +211,28 @@ def page_analysis():
         
         with d1:
             st.caption("Dividend Yield")
-            st.markdown(f"# {_fmt_pct(divk.get('dividend_yield'))}")
+            st.markdown(f"#### {_fmt_pct(divk.get('dividend_yield'))}")
 
         with d2:
             st.caption("Forward Div. Yield")
-            st.markdown(f"# {_fmt_pct(divk.get('forward_div_yield'))}")
+            st.markdown(f"#### {_fmt_pct(divk.get('forward_div_yield'))}")
 
         with d3:
             st.caption("Dividendo Anual $")
-            st.markdown(f"# {_fmt_kpi(divk.get('annual_dividend'), decimals=2)}")
+            st.markdown(f"#### {_fmt_kpi(divk.get('annual_dividend'), decimals=2)}")
 
         d4, d5, d6 = st.columns(3, gap="large")
         
         with d4:
             st.caption("PayOut Ratio %")
-            st.markdown(f"# {_fmt_pct(divk.get('payout_ratio'))}")
+            st.markdown(f"#### {_fmt_pct(divk.get('payout_ratio'))}")
 
         with d5:
             st.caption("Ex-Date fecha")
             exd = divk.get("ex_div_date")
-            st.markdown(f"# {exd if isinstance(exd, str) and exd else 'N/D'}")
+            st.markdown(f"#### {exd if isinstance(exd, str) and exd else 'N/D'}")
 
         with d6:
             st.caption("Próximo Dividendo $")
-            st.markdown(f"# {_fmt_kpi(divk.get('next_dividend'), decimals=2)}")
+            st.markdown(f"#### {_fmt_kpi(divk.get('next_dividend'), decimals=2)}")
 
